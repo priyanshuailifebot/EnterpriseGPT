@@ -11,7 +11,7 @@
  * and only committed when it parses cleanly.
  */
 
-import { CheckCircle2, Loader2, PlugZap, Trash2 } from "lucide-react";
+import { CheckCircle2, Loader2, PlugZap, Sparkles, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
@@ -31,14 +31,17 @@ import type {
   NativeConnectionResponse,
   NativeProviderCatalogEntry,
   NativeProviderCatalogResponse,
+  NodeSummaryResponse,
   OutputParserNode,
   TriggerNode,
   WaitForWebhookNode,
+  WorkflowDefinition,
   WorkflowNode,
 } from "@/types/api";
 
 import type { EditorState } from "./useWorkflowEditor";
 import { allNodes } from "./workflow-mutations";
+import { summarizeNode } from "./workflow-summary";
 
 interface PropertyInspectorProps {
   state: Pick<EditorState, "definition" | "selectedId">;
@@ -46,6 +49,9 @@ interface PropertyInspectorProps {
   onRenameId: (oldId: string, newId: string) => void;
   onRemoveNode: (id: string) => void;
   onClearSelection: () => void;
+  /** Saved-workflow id, enabling the LLM "detailed summary" call. ``null``
+   *  for an unsaved draft — the instant template still shows. */
+  workflowId?: string | null;
 }
 
 export function PropertyInspector({
@@ -54,6 +60,7 @@ export function PropertyInspector({
   onRenameId,
   onRemoveNode,
   onClearSelection,
+  workflowId,
 }: PropertyInspectorProps) {
   const selected = useMemo(() => {
     if (!state.selectedId) return null;
@@ -102,6 +109,12 @@ export function PropertyInspector({
         </button>
       </header>
 
+      <NodeSummary
+        node={selected}
+        definition={state.definition}
+        workflowId={workflowId}
+      />
+
       <CommonFields
         node={selected}
         onPatch={(p) => onPatchNode(selected.id, p)}
@@ -114,6 +127,101 @@ export function PropertyInspector({
         onPatch={(p) => onPatchNode(selected.id, p)}
       />
     </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Node summary — instant deterministic template + optional LLM detail
+// ---------------------------------------------------------------------------
+
+/** Detailed (LLM) summaries cached for the session, keyed by workflow + node
+ *  content so an unchanged node is never re-fetched. */
+const detailedSummaryCache = new Map<string, string>();
+
+function NodeSummary({
+  node,
+  definition,
+  workflowId,
+}: {
+  node: WorkflowNode;
+  definition: WorkflowDefinition;
+  workflowId?: string | null;
+}) {
+  const template = useMemo(
+    () => summarizeNode(node, definition),
+    [node, definition],
+  );
+  // Cache key folds in the node's content so editing it invalidates the
+  // detailed summary; re-selecting an unchanged node restores it for free.
+  const cacheKey = useMemo(
+    () => `${workflowId ?? "_"}:${node.id}:${JSON.stringify(node)}`,
+    [workflowId, node],
+  );
+
+  const [detailed, setDetailed] = useState<string | null>(
+    () => detailedSummaryCache.get(cacheKey) ?? null,
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDetailed(detailedSummaryCache.get(cacheKey) ?? null);
+    setError(null);
+  }, [cacheKey]);
+
+  const generate = useCallback(async () => {
+    if (!workflowId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { data } = await api.post<NodeSummaryResponse>(
+        `/api/v1/workflows/${workflowId}/nodes/${encodeURIComponent(node.id)}/summary`,
+        { definition },
+      );
+      detailedSummaryCache.set(cacheKey, data.summary);
+      setDetailed(data.summary);
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data
+          ?.detail ?? "Could not generate a summary.";
+      setError(detail);
+    } finally {
+      setLoading(false);
+    }
+  }, [workflowId, node.id, definition, cacheKey]);
+
+  return (
+    <section className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/60">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          {detailed ? "Detailed summary" : "Summary"}
+        </span>
+        <button
+          type="button"
+          onClick={() => void generate()}
+          disabled={loading || !workflowId}
+          title={
+            workflowId
+              ? "Generate a detailed AI explanation of this node"
+              : "Save the workflow to enable AI summaries"
+          }
+          className="inline-flex items-center gap-1 rounded-md border border-brand-200 px-2 py-1 text-[10px] font-semibold text-brand-700 hover:bg-brand-50 disabled:opacity-50 dark:border-brand-900 dark:text-brand-300 dark:hover:bg-brand-950"
+        >
+          {loading ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Sparkles className="h-3 w-3" />
+          )}
+          {loading ? "Generating…" : detailed ? "Regenerate" : "Detailed summary"}
+        </button>
+      </div>
+      <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
+        {detailed ?? template}
+      </p>
+      {error ? (
+        <p className="text-[10px] text-rose-600 dark:text-rose-400">{error}</p>
+      ) : null}
+    </section>
   );
 }
 

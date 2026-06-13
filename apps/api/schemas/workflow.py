@@ -920,6 +920,32 @@ class AugmentResponse(BaseModel):
     )
 
 
+class NodeSummaryRequest(BaseModel):
+    """Body for an on-demand, LLM-generated explanation of one node.
+
+    The caller hands us the *current working* definition (which may include
+    unsaved canvas edits) so the summary reflects exactly what the user sees
+    rather than the last persisted version. The node to explain is identified
+    by the ``node_id`` path parameter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition: WorkflowDefinition
+
+
+class NodeSummaryResponse(BaseModel):
+    """Plain-English explanation of a single node, with a cache-hit flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    cached: bool = Field(
+        default=False,
+        description="True when served from the per-node-version cache.",
+    )
+
+
 class WorkflowCreateBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1117,6 +1143,8 @@ __all__ = [
     "MergeNode",
     "NeedsClarificationResponse",
     "NodeDefinition",
+    "NodeSummaryRequest",
+    "NodeSummaryResponse",
     "OutputParserNode",
     "ReadyResponse",
     "TriggerNode",

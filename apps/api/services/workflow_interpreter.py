@@ -382,6 +382,21 @@ in the executor's top-level walk, so don't put them in any
 Output ONLY the complete new WorkflowDefinition JSON."""
 
 
+SUMMARIZE_NODE_SYSTEM_PROMPT = """You explain ONE node of an automated workflow to a non-technical business user.
+
+You receive the full workflow definition (JSON) and the id of one node.
+Write a SHORT, plain-English explanation of that single node covering:
+  - what this node does,
+  - when it runs (its trigger, upstream dependencies, or branch condition),
+  - and what it produces or hands to the next step.
+
+Rules:
+  - 2 to 4 sentences. No headings, no bullet points, no markdown, no JSON.
+  - Refer to other nodes by their human NAME, never their id.
+  - Do not restate the whole workflow — focus on this one node.
+  - Plain, concrete language a non-technical user understands. No jargon."""
+
+
 class WorkflowInterpretationError(RuntimeError):
     """Raised when interpreter cannot produce a schema-valid definition."""
 
@@ -444,6 +459,77 @@ class WorkflowInterpreter:
         if not content.strip():
             raise WorkflowInterpretationError("LLM returned empty content")
         return content
+
+    @trace_llm
+    async def _complete_text(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+    ) -> str:
+        """Plain-text completion (no JSON-mode), used for prose like node
+        summaries. Mirrors :meth:`_call_llm` but without ``response_format``."""
+        deployment = (
+            self._settings.AZURE_OPENAI_DEPLOYMENT
+            or self._settings.AZURE_OPENAI_DEFAULT_MODEL
+        )
+        client = self._azure_client()
+        completion = await client.chat.completions.create(
+            model=deployment,
+            temperature=temperature,
+            messages=messages,
+        )
+        usage = completion.usage
+        if usage is not None:
+            ud = {
+                k: int(v)
+                for k, v in {
+                    "input": usage.prompt_tokens,
+                    "output": usage.completion_tokens,
+                    "total": usage.total_tokens,
+                }.items()
+                if v is not None
+            }
+            if ud:
+                try:
+                    get_client().update_current_generation(
+                        model=deployment,
+                        usage_details=ud,
+                    )
+                except Exception:  # noqa: BLE001 — telemetry must not break the call
+                    log.debug("langfuse.update_generation_failed", exc_info=True)
+        content = completion.choices[0].message.content or ""
+        if not content.strip():
+            raise WorkflowInterpretationError("LLM returned empty content")
+        return content.strip()
+
+    @observe()
+    async def summarize_node(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        node_id: str,
+    ) -> str:
+        """Return a short plain-English explanation of a single node.
+
+        The caller guarantees ``node_id`` exists in ``definition``. We pass the
+        full graph for context so the model can reference upstream node names,
+        and ask for prose (not JSON) via :meth:`_complete_text`.
+        """
+        definition_json = definition.model_dump_json()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SUMMARIZE_NODE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"WORKFLOW:\n{definition_json}\n\nEXPLAIN_NODE_ID: {node_id}"
+                ),
+            },
+        ]
+        try:
+            return await self._complete_text(messages=messages)
+        except OpenAIAPIError as exc:
+            raise WorkflowInterpretationError(str(exc)) from exc
 
     @observe()
     async def interpret(

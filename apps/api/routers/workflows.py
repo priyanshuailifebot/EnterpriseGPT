@@ -33,6 +33,8 @@ from schemas.workflow import (
     HITLApprovalBody,
     InterpretRequest,
     NeedsClarificationResponse,
+    NodeSummaryRequest,
+    NodeSummaryResponse,
     ReadyResponse,
     WorkflowCreateBody,
     WorkflowDetailOut,
@@ -317,6 +319,37 @@ async def augment_workflow_route(
         current_definition=body.current_definition,
     )
     return AugmentResponse(proposed_definition=proposed, changes=changes)
+
+
+@router.post(
+    "/{workflow_id}/nodes/{node_id}/summary",
+    dependencies=[require_permission(Permission.WORKFLOW_READ)],
+    response_model=NodeSummaryResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def summarize_node_route(
+    workflow_id: UUID,
+    node_id: str,
+    body: NodeSummaryRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> NodeSummaryResponse:
+    """Return an LLM-generated plain-English explanation of one node.
+
+    Operates on the definition supplied in the body (which may contain
+    unsaved canvas edits) so the summary matches what the user sees.
+    Results are cached per node-version, so re-requesting an unchanged node
+    is free.
+    """
+    summary, cached = await service.summarize_node(
+        db,
+        user=user,
+        workflow_id=workflow_id,
+        node_id=node_id,
+        definition=body.definition,
+    )
+    return NodeSummaryResponse(summary=summary, cached=cached)
 
 
 @router.delete(

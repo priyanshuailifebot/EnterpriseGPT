@@ -349,6 +349,11 @@ export interface AugmentResponse {
   changes: string[];
 }
 
+export interface NodeSummaryResponse {
+  summary: string;
+  cached: boolean;
+}
+
 export type ExecutionEventType =
   | "workflow_start"
   | "agent_start"

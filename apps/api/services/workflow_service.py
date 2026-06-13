@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -412,6 +413,69 @@ class WorkflowService:
             change_count=len(changes),
         )
         return proposed, changes
+
+    async def summarize_node(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        workflow_id: UUID,
+        node_id: str,
+        definition: WorkflowDefinition,
+    ) -> tuple[str, bool]:
+        """Return ``(summary, cached)`` — a plain-English explanation of one node.
+
+        Enforces the same workspace-membership / existence checks as the rest
+        of the workflow API, then serves from a Redis cache keyed by the
+        node's content hash (so a given node-version is only paid for once)
+        and falls back to an LLM call on a miss.
+        """
+        from fastapi import HTTPException, status
+
+        row = await self._fetch_workflow_for_user(
+            db, user_id=user.id, workflow_id=workflow_id
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found"
+            )
+
+        node = next(
+            (n for n in definition.iter_nodes() if n.id == node_id), None
+        )
+        if node is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"node {node_id!r} not found in definition",
+            )
+
+        # Cache by the node's own content so edits invalidate naturally and
+        # re-selecting an unchanged node is free.
+        node_hash = hashlib.sha256(node.model_dump_json().encode("utf-8")).hexdigest()
+        cache_key = f"wf:node_summary:{workflow_id}:{node_hash}"
+        redis = _redis_global()
+        try:
+            cached_summary = await redis.get(cache_key)
+        except Exception:  # noqa: BLE001 — cache is best-effort
+            cached_summary = None
+        if cached_summary:
+            return cached_summary, True
+
+        try:
+            summary = await self._interp.summarize_node(
+                definition=definition, node_id=node_id
+            )
+        except WorkflowInterpretationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+
+        try:
+            # 7-day TTL — node summaries are stable for a node-version.
+            await redis.setex(cache_key, 7 * 24 * 3600, summary)
+        except Exception:  # noqa: BLE001 — never fail the request on a cache write
+            log.debug("workflow.node_summary.cache_write_failed", exc_info=True)
+        return summary, False
 
     async def create_workflow(
         self,

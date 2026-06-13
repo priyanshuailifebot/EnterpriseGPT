@@ -522,6 +522,7 @@ function CanvasInner({
           onRenameId={renameAction}
           onRemoveNode={removeNodeAction}
           onClearSelection={() => selectNode(null)}
+          workflowId={workflowId}
         />
       ) : null}
 
