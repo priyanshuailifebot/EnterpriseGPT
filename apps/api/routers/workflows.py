@@ -317,6 +317,7 @@ async def augment_workflow_route(
         workflow_id=workflow_id,
         message=body.message,
         current_definition=body.current_definition,
+        focus_node_id=body.focus_node_id,
     )
     return AugmentResponse(proposed_definition=proposed, changes=changes)
 

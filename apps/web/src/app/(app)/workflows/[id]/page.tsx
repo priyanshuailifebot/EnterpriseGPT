@@ -138,7 +138,7 @@ function SavedWorkflowCanvas({
   store: EditorStore;
   workflowId: string;
 }) {
-  const { onSave, onAugment } = useCanvasPersistence(store, workflowId);
+  const { onSave, onAugment } = useCanvasPersistence(workflowId);
   return (
     <InteractiveCanvas
       store={store}

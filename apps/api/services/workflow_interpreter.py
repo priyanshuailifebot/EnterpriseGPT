@@ -605,6 +605,7 @@ class WorkflowInterpreter:
         current_definition: WorkflowDefinition,
         user_message: str,
         available_tools: list[str],
+        focus_node_id: str | None = None,
     ) -> WorkflowDefinition:
         """Return a modified ``WorkflowDefinition`` reflecting ``user_message``.
 
@@ -612,9 +613,21 @@ class WorkflowInterpreter:
         from ``current_definition`` are expected to be preserved by the
         LLM — we don't enforce that here (the schema would reject an
         invalid graph anyway), but the system prompt makes it the rule.
+
+        When ``focus_node_id`` is given, the instruction is scoped to that
+        node: the model is told to change that node (and only re-wire what's
+        strictly necessary), leaving every other node verbatim.
         """
         tools_prompt = ", ".join(available_tools) if available_tools else "(none)"
         current_json = current_definition.model_dump_json()
+        focus_clause = ""
+        if focus_node_id:
+            focus_clause = (
+                f"FOCUS_NODE_ID: {focus_node_id}\n"
+                "The instruction below is about this node specifically. Apply the "
+                "change to it (and only re-wire neighbours if strictly required); "
+                "copy every other node verbatim.\n\n"
+            )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": AUGMENT_SYSTEM_PROMPT},
             {
@@ -622,6 +635,7 @@ class WorkflowInterpreter:
                 "content": (
                     f"Available tools: {tools_prompt}\n\n"
                     f"CURRENT_DEFINITION:\n{current_json}\n\n"
+                    f"{focus_clause}"
                     f"INSTRUCTION:\n{user_message.strip()}"
                 ),
             },

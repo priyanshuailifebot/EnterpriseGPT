@@ -7,7 +7,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 
 import { ClarificationPanel } from "@/components/workflow/ClarificationPanel";
-import { InteractiveCanvas } from "@/components/workflow/InteractiveCanvas";
+import {
+  InteractiveCanvas,
+  type AugmentInput,
+  type AugmentProposal,
+} from "@/components/workflow/InteractiveCanvas";
 import { NLInput } from "@/components/workflow/NLInput";
 import { VisualEditor } from "@/components/workflow/VisualEditor";
 import { WorkflowPreview } from "@/components/workflow/WorkflowPreview";
@@ -276,34 +280,26 @@ export function WorkflowBuilder({
   );
 
   /**
-   * Call POST /workflows/{id}/augment with the current definition + an
-   * NL instruction. On success, replace the editor store's definition
-   * with the proposed graph; the user can keep iterating or Save to
-   * commit.
+   * Call POST /workflows/{id}/augment with the current definition + an NL
+   * instruction and return the proposed graph + change list. The canvas
+   * previews the diff and applies it only when the user Accepts.
    */
   const refineWithAI = useCallback(
-    async (message: string): Promise<void> => {
-      if (!savedWorkflowId || !editorStore) {
+    async (input: AugmentInput): Promise<AugmentProposal> => {
+      if (!savedWorkflowId) {
         toast.error("Save the workflow at least once before refining.");
-        return;
+        throw new Error("not saved");
       }
-      const current = editorStore.getState().definition;
       try {
         const { data } = await api.post<AugmentResponse>(
           `/api/v1/workflows/${savedWorkflowId}/augment`,
           {
-            message,
-            current_definition: current,
+            message: input.message,
+            current_definition: input.definition,
+            focus_node_id: input.focusNodeId,
           },
         );
-        editorStore.getState().reset(data.proposed_definition);
-        if (data.changes.length > 0) {
-          toast.success(
-            `Applied ${data.changes.length} change${data.changes.length === 1 ? "" : "s"}.`,
-          );
-        } else {
-          toast(`No structural changes.`);
-        }
+        return { proposed: data.proposed_definition, changes: data.changes };
       } catch (e) {
         const msg =
           axios.isAxiosError(e)
@@ -315,7 +311,7 @@ export function WorkflowBuilder({
         throw new Error(msg);
       }
     },
-    [editorStore, savedWorkflowId],
+    [savedWorkflowId],
   );
 
   if (!workspaceId) {

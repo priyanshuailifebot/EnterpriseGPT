@@ -9,9 +9,9 @@
  *  - ``onSave``    → ``PUT /workflows/{id}`` (creates a new version) via the
  *                    workflow store, so the library + detail caches stay in
  *                    sync.
- *  - ``onAugment`` → ``POST /workflows/{id}/augment`` then swaps the editor
- *                    store's definition for the proposed graph, letting the
- *                    user review and Save (or Undo).
+ *  - ``onAugment`` → ``POST /workflows/{id}/augment`` and returns the proposed
+ *                    graph + change list. It does NOT apply anything — the
+ *                    canvas previews the diff and the user Accepts to apply.
  *
  * ``WorkflowBuilder`` (``/workflows/new``) intentionally does NOT use this
  * hook: its first Save must *create* the workflow (POST) before subsequent
@@ -26,9 +26,9 @@ import { api, getErrorMessage } from "@/lib/api";
 import { useWorkflowStore } from "@/stores/workflowStore";
 import type { AugmentResponse, WorkflowDefinition } from "@/types/api";
 
-import type { EditorStore } from "./useWorkflowEditor";
+import type { AugmentInput, AugmentProposal } from "./InteractiveCanvas";
 
-export function useCanvasPersistence(store: EditorStore, workflowId: string) {
+export function useCanvasPersistence(workflowId: string) {
   const updateWorkflow = useWorkflowStore((s) => s.updateWorkflow);
 
   const onSave = useCallback(
@@ -39,23 +39,17 @@ export function useCanvasPersistence(store: EditorStore, workflowId: string) {
   );
 
   const onAugment = useCallback(
-    async (message: string): Promise<void> => {
-      const current = store.getState().definition;
+    async (input: AugmentInput): Promise<AugmentProposal> => {
       try {
         const { data } = await api.post<AugmentResponse>(
           `/api/v1/workflows/${workflowId}/augment`,
-          { message, current_definition: current },
+          {
+            message: input.message,
+            current_definition: input.definition,
+            focus_node_id: input.focusNodeId,
+          },
         );
-        // Replace the working definition with the proposed graph. The user
-        // previews it on the canvas and explicitly Saves to persist.
-        store.getState().reset(data.proposed_definition);
-        if (data.changes.length > 0) {
-          toast.success(
-            `Applied ${data.changes.length} change${data.changes.length === 1 ? "" : "s"}.`,
-          );
-        } else {
-          toast("No structural changes.");
-        }
+        return { proposed: data.proposed_definition, changes: data.changes };
       } catch (e) {
         const msg = axios.isAxiosError(e)
           ? getErrorMessage(e)
@@ -66,7 +60,7 @@ export function useCanvasPersistence(store: EditorStore, workflowId: string) {
         throw new Error(msg);
       }
     },
-    [store, workflowId],
+    [workflowId],
   );
 
   return { onSave, onAugment };

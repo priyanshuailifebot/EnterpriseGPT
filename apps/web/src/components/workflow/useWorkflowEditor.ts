@@ -45,8 +45,13 @@ export interface EditorState {
 }
 
 export interface EditorActions {
-  /** Replace the definition wholesale (used on initial load + after augment). */
+  /** Replace the definition wholesale (used on initial load). Clears history
+   *  and the dirty flag. */
   reset: (defn: WorkflowDefinition) => void;
+  /** Apply an externally-proposed definition (an accepted AI refinement) as a
+   *  single undoable, dirty-marking edit — unlike ``reset`` it keeps history
+   *  and forces a Save. */
+  applyProposed: (defn: WorkflowDefinition) => void;
   /** Mark the current state as saved. Clears ``isDirty`` without touching history. */
   markSaved: () => void;
   selectNode: (id: string | null) => void;
@@ -101,6 +106,20 @@ export function createWorkflowEditorStore(initial: WorkflowDefinition) {
           isDirty: false,
           issues: validateDefinition(defn),
         }),
+
+      applyProposed: (defn) => {
+        const current = get().definition;
+        if (defn === current) return;
+        const past = [...get().past, current].slice(-MAX_HISTORY);
+        set({
+          definition: defn,
+          past,
+          future: [],
+          selectedId: null,
+          isDirty: true,
+          issues: validateDefinition(defn),
+        });
+      },
 
       markSaved: () => set({ isDirty: false }),
 

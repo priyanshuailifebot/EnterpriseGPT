@@ -65,14 +65,21 @@ import type {
   WorkflowStatus,
 } from "@/types/api";
 
-import { AIRefineDrawer } from "./AIRefineDrawer";
 import { NodeInspectDrawer } from "./NodeInspectDrawer";
 import { NodePalette, PALETTE_DRAG_MIME } from "./NodePalette";
 import { PropertyInspector } from "./PropertyInspector";
 import { TestRunPanel } from "./TestRunPanel";
+import { WorkflowChatPanel, type ChatSubmitResult } from "./WorkflowChatPanel";
 import { type ExecutionRunState } from "./execution-status";
 import { type EditorStore } from "./useWorkflowEditor";
 import {
+  type NodeDiff,
+  diffClassName,
+  diffDefinitions,
+  diffIsEmpty,
+} from "./workflow-diff";
+import {
+  allNodes,
   makeBlankNode,
   uniqueIdFrom,
   type NodeKind,
@@ -92,14 +99,27 @@ import { workflowToFlowGraph } from "./workflow-topology";
 const NODE_COL_X = 300;
 const NODE_ROW_Y = 200;
 
+export interface AugmentInput {
+  message: string;
+  focusNodeId: string | null;
+  definition: WorkflowDefinition;
+}
+
+export interface AugmentProposal {
+  proposed: WorkflowDefinition;
+  changes: string[];
+}
+
 export interface InteractiveCanvasProps {
   store: EditorStore;
   /** Workflow id when the canvas is editing a saved workflow. ``null`` for
    *  a brand-new graph that hasn't been persisted yet (Save creates it). */
   workflowId: string | null;
   onSave: (defn: WorkflowDefinition) => Promise<void> | void;
-  onAugment?: (message: string) => Promise<void> | void;
-  /** Disables the AI Refine drawer when the parent doesn't wire augment. */
+  /** Resolve an NL refine request to a proposed graph (NOT applied). The
+   *  canvas previews the diff and applies it only when the user Accepts. */
+  onAugment?: (input: AugmentInput) => Promise<AugmentProposal>;
+  /** Disables the AI Refine panel when the parent doesn't wire augment. */
   readOnly?: boolean;
 }
 
@@ -135,6 +155,17 @@ function CanvasInner({
   const undo = useStore(store, (s) => s.undo);
   const redo = useStore(store, (s) => s.redo);
   const markSaved = useStore(store, (s) => s.markSaved);
+  const applyProposedAction = useStore(store, (s) => s.applyProposed);
+
+  // ----------------------------------------------------------------------
+  // AI refine — a proposed graph awaiting accept/reject. While set, the
+  // canvas renders ``preview.proposed`` (read-only) with diff rings instead
+  // of the editable store definition.
+  // ----------------------------------------------------------------------
+  const [chatOpen, setChatOpen] = useState(false);
+  const [preview, setPreview] = useState<
+    { proposed: WorkflowDefinition; diff: NodeDiff } | null
+  >(null);
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const reactFlow = useReactFlow();
@@ -198,14 +229,29 @@ function CanvasInner({
   // two canvases visually identical and avoids divergence bugs (the
   // older hand-rolled ``allNodes + autoLayout`` path was silently
   // dropping nodes when the LLM emitted certain shapes).
+  // While a refine proposal is pending, the canvas shows the PROPOSED graph
+  // (read-only) so the diff rings line up; otherwise the live store graph.
+  const activeDefinition = preview?.proposed ?? definition;
+
   const nodesView = useMemo(() => {
-    const { nodes: topo } = workflowToFlowGraph(definition);
+    const { nodes: topo } = workflowToFlowGraph(activeDefinition);
     const out: Node[] = topo.map((n) => {
       const xy = positions[n.id] ?? {
         x: 48 + n.depth * NODE_COL_X,
         y: 56 + n.orderInLevel * NODE_ROW_Y,
       };
       const raw = n.data.raw;
+      // Preview mode: paint diff rings, suppress run/selection chrome.
+      if (preview) {
+        return {
+          id: n.id,
+          type: flowTypeForKind(n.data.kind),
+          position: xy,
+          data: toFlowNodeData(raw, activeDefinition, undefined),
+          selected: false,
+          className: diffClassName(n.id, preview.diff),
+        };
+      }
       const runStatus = executionState?.nodes[n.id];
       // Badge action nodes whose (connectable) provider has no active
       // connection — but only when we're not mid-run (run rings take over).
@@ -220,7 +266,7 @@ function CanvasInner({
         id: n.id,
         type: flowTypeForKind(n.data.kind),
         position: xy,
-        data: toFlowNodeData(raw, definition, runStatus),
+        data: toFlowNodeData(raw, activeDefinition, runStatus),
         selected: n.id === selectedId,
         className: runStatus
           ? `egpt-run-${runStatus.status}`
@@ -230,10 +276,18 @@ function CanvasInner({
       };
     });
     return out;
-  }, [definition, positions, selectedId, executionState]);
+  }, [
+    activeDefinition,
+    preview,
+    positions,
+    selectedId,
+    executionState,
+    catalogProviderIds,
+    connectedProviders,
+  ]);
 
   const edgesView = useMemo(() => {
-    const { edges } = workflowToFlowGraph(definition);
+    const { edges } = workflowToFlowGraph(activeDefinition);
     return edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -244,10 +298,12 @@ function CanvasInner({
       animated: true,
       data: { branchLabel: e.branchLabel, fromForEach: e.fromForEach },
     })) as Edge[];
-  }, [definition]);
+  }, [activeDefinition]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      // Editing is frozen while reviewing an AI proposal.
+      if (preview) return;
       // Apply React Flow's local position changes (dragging) into our
       // positions map. Selection changes funnel back into the store.
       const next = applyNodeChanges(changes, nodesView);
@@ -270,11 +326,12 @@ function CanvasInner({
         }
       }
     },
-    [nodesView, positions, selectNode, removeNodeAction, executionState],
+    [nodesView, positions, selectNode, removeNodeAction, executionState, preview],
   );
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
+      if (preview) return;
       for (const ch of changes) {
         if (ch.type === "remove") {
           const edge = edgesView.find((e) => e.id === ch.id);
@@ -285,11 +342,12 @@ function CanvasInner({
       // here because the store is the source of truth.
       void applyEdgeChanges(changes, edgesView);
     },
-    [disconnectAction, edgesView],
+    [disconnectAction, edgesView, preview],
   );
 
   const onConnect = useCallback(
     (conn: Connection) => {
+      if (preview) return;
       if (!conn.source || !conn.target) return;
       connectAction(conn.source, conn.target);
       // ``addEdge`` is unused here — we re-derive edges from the store —
@@ -297,7 +355,7 @@ function CanvasInner({
       // the local view. Keeping the call out avoids a no-op flicker.
       void addEdge;
     },
-    [connectAction],
+    [connectAction, preview],
   );
 
   const onDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
@@ -308,6 +366,7 @@ function CanvasInner({
   const onDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
+      if (preview) return;
       const kind = e.dataTransfer.getData(PALETTE_DRAG_MIME) as NodeKind | "";
       if (!kind) return;
       const bounds = wrapperRef.current?.getBoundingClientRect();
@@ -322,7 +381,7 @@ function CanvasInner({
       addNodeAction(node as WorkflowNode);
       setPositions((prev) => ({ ...prev, [id]: position }));
     },
-    [reactFlow, definition, addNodeAction],
+    [reactFlow, definition, addNodeAction, preview],
   );
 
   // Click on empty canvas → clear selection so the inspector stops
@@ -335,6 +394,7 @@ function CanvasInner({
   // Keyboard shortcuts — undo/redo + delete the selected node.
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
+      if (preview) return;
       const ctrl = e.metaKey || e.ctrlKey;
       if (ctrl && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -347,14 +407,56 @@ function CanvasInner({
         removeNodeAction(selectedId);
       }
     },
-    [undo, redo, selectedId, removeNodeAction],
+    [undo, redo, selectedId, removeNodeAction, preview],
   );
 
   // ----------------------------------------------------------------------
   // Save handler + dirty guard
   // ----------------------------------------------------------------------
   const [saving, setSaving] = useState(false);
-  const [refineOpen, setRefineOpen] = useState(false);
+
+  // ----------------------------------------------------------------------
+  // AI refine flow — request a proposal (no apply), preview it, accept/reject.
+  // ----------------------------------------------------------------------
+  const selectedNode = useMemo(() => {
+    if (!selectedId) return null;
+    const n = allNodes(definition).find((x) => x.id === selectedId);
+    return n ? { id: n.id, name: n.name || n.id } : null;
+  }, [definition, selectedId]);
+
+  const handleChatSubmit = useCallback(
+    async (message: string, focusNodeId: string | null): Promise<ChatSubmitResult> => {
+      if (!onAugment) return { ok: false, changes: [], hasPreview: false };
+      try {
+        const current = store.getState().definition;
+        const { proposed, changes } = await onAugment({
+          message,
+          focusNodeId,
+          definition: current,
+        });
+        const diff = diffDefinitions(current, proposed);
+        if (diffIsEmpty(diff)) {
+          return { ok: true, changes, hasPreview: false };
+        }
+        setPreview({ proposed, diff });
+        return { ok: true, changes, hasPreview: true };
+      } catch {
+        // onAugment surfaces its own error toast.
+        return { ok: false, changes: [], hasPreview: false };
+      }
+    },
+    [onAugment, store],
+  );
+
+  const acceptPreview = useCallback(() => {
+    if (!preview) return;
+    applyProposedAction(preview.proposed);
+    setPreview(null);
+  }, [preview, applyProposedAction]);
+
+  const rejectPreview = useCallback(() => {
+    setPreview(null);
+  }, []);
 
   // ----------------------------------------------------------------------
   // Publish lifecycle — status badge + Publish/Unpublish (publish-gate).
@@ -468,7 +570,7 @@ function CanvasInner({
           onSave={() => void handleSave()}
           onUndo={undo}
           onRedo={redo}
-          onOpenRefine={() => setRefineOpen(true)}
+          onOpenRefine={() => setChatOpen((o) => !o)}
           onOpenTestRun={() => setTestPanelOpen(true)}
         />
         <div
@@ -486,6 +588,9 @@ function CanvasInner({
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onPaneClick={onPaneClick}
+            nodesDraggable={!preview}
+            nodesConnectable={!preview}
+            elementsSelectable={!preview}
             fitView
             fitViewOptions={{ padding: 0.2 }}
             proOptions={{ hideAttribution: true }}
@@ -510,6 +615,13 @@ function CanvasInner({
                 </p>
               </div>
             </div>
+          ) : null}
+          {preview ? (
+            <DiffReviewBanner
+              diff={preview.diff}
+              onAccept={acceptPreview}
+              onReject={rejectPreview}
+            />
           ) : null}
         </div>
         {issues.length > 0 ? <IssuesBar issues={issues} /> : null}
@@ -536,14 +648,16 @@ function CanvasInner({
         runState={inspectNodeId ? executionState?.nodes[inspectNodeId] : undefined}
       />
 
-      <AIRefineDrawer
-        open={refineOpen}
-        onClose={() => setRefineOpen(false)}
+      <WorkflowChatPanel
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
         disabled={!onAugment || !workflowId}
-        onSubmit={async (message) => {
-          if (!onAugment) return;
-          await onAugment(message);
-        }}
+        selectedNode={selectedNode}
+        onClearScope={() => selectNode(null)}
+        pendingPreview={preview !== null}
+        onSubmit={handleChatSubmit}
+        onAccept={acceptPreview}
+        onReject={rejectPreview}
       />
 
       <TestRunPanel
@@ -760,5 +874,49 @@ function IssuesBar({
         <li className="opacity-70">… and {issues.length - 6} more</li>
       ) : null}
     </ul>
+  );
+}
+
+/** Sticky banner shown over the canvas while an AI proposal is being
+ *  reviewed. Mirrors the chat panel's Accept/Reject so closing the chat
+ *  never strands a pending preview. */
+function DiffReviewBanner({
+  diff,
+  onAccept,
+  onReject,
+}: {
+  diff: NodeDiff;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  const parts: string[] = [];
+  if (diff.added.size) parts.push(`${diff.added.size} added`);
+  if (diff.modified.size) parts.push(`${diff.modified.size} edited`);
+  if (diff.removed.size) parts.push(`${diff.removed.size} removed`);
+  const removedNames = [...diff.removed];
+  return (
+    <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-brand-200 bg-white/95 px-4 py-2 shadow-lg backdrop-blur dark:border-brand-900 dark:bg-slate-900/95">
+      <Wand2 className="h-4 w-4 text-brand-600 dark:text-brand-300" />
+      <span className="text-[12px] font-medium text-slate-700 dark:text-slate-200">
+        Proposed changes{parts.length ? `: ${parts.join(", ")}` : ""}
+        {removedNames.length
+          ? ` (removes ${removedNames.slice(0, 3).join(", ")}${removedNames.length > 3 ? "…" : ""})`
+          : ""}
+      </span>
+      <button
+        type="button"
+        onClick={onAccept}
+        className="rounded-md bg-emerald-600 px-3 py-1 text-[12px] font-semibold text-white hover:bg-emerald-700"
+      >
+        Accept
+      </button>
+      <button
+        type="button"
+        onClick={onReject}
+        className="rounded-md border border-slate-300 px-3 py-1 text-[12px] font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+      >
+        Reject
+      </button>
+    </div>
   );
 }

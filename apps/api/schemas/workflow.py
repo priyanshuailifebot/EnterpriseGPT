@@ -901,6 +901,14 @@ class AugmentRequest(BaseModel):
         description="NL instruction describing what to change.",
     )
     current_definition: WorkflowDefinition
+    focus_node_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "When set, the instruction is scoped to this node — the model is "
+            "told to focus its change there. Other nodes are still preserved."
+        ),
+    )
 
 
 class AugmentResponse(BaseModel):

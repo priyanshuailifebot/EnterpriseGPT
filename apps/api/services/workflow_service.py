@@ -378,6 +378,7 @@ class WorkflowService:
         workflow_id: UUID,
         message: str,
         current_definition: WorkflowDefinition,
+        focus_node_id: str | None = None,
     ) -> tuple[WorkflowDefinition, list[str]]:
         """Return a proposed (NOT persisted) modification of ``current_definition``.
 
@@ -401,6 +402,7 @@ class WorkflowService:
                 current_definition=current_definition,
                 user_message=message,
                 available_tools=tools,
+                focus_node_id=focus_node_id,
             )
         except WorkflowInterpretationError as exc:
             raise HTTPException(

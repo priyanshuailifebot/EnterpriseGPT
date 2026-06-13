@@ -100,6 +100,63 @@
   white-space: nowrap;
 }
 
+/* AI-refine preview diff — applied while the user reviews a proposed graph
+   before accepting it. Green = added node, amber = modified, dashed grey =
+   a node the proposal would remove (rendered as a ghost). */
+.react-flow__node.egpt-diff-added > div {
+  box-shadow: 0 0 0 2px rgb(16 185 129), 0 0 0 7px rgba(16, 185, 129, 0.2);
+}
+.react-flow__node.egpt-diff-added > div::after {
+  content: "+ new";
+  position: absolute;
+  top: -9px;
+  right: -6px;
+  background: rgb(16 185 129);
+  color: white;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.react-flow__node.egpt-diff-modified > div {
+  box-shadow: 0 0 0 2px rgb(245 158 11), 0 0 0 7px rgba(245, 158, 11, 0.18);
+}
+.react-flow__node.egpt-diff-modified > div::after {
+  content: "edited";
+  position: absolute;
+  top: -9px;
+  right: -6px;
+  background: rgb(245 158 11);
+  color: white;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.react-flow__node.egpt-diff-removed > div {
+  opacity: 0.4;
+  filter: grayscale(0.6);
+  box-shadow: 0 0 0 2px rgb(244 63 94);
+}
+.react-flow__node.egpt-diff-removed > div::after {
+  content: "− removed";
+  position: absolute;
+  top: -9px;
+  right: -6px;
+  background: rgb(244 63 94);
+  color: white;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 @keyframes egpt-pulse {
   0%, 100% { filter: brightness(1); }
   50% { filter: brightness(1.08); }
