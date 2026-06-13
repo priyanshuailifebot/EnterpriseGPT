@@ -1,0 +1,1233 @@
+import asyncio
+import threading
+from enum import Enum
+from queue import Queue
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
+
+from dynamiq.callbacks import BaseCallbackHandler
+from dynamiq.callbacks.base import get_run_id
+from dynamiq.types.streaming import (
+    AgentToolData,
+    AgentToolInputDeltaData,
+    AgentToolInputStartData,
+    StreamingEntitySource,
+    StreamingEventMessage,
+    StreamingMode,
+    StreamingThought,
+)
+from dynamiq.utils import format_value, generate_uuid
+from dynamiq.utils.logger import logger
+
+if TYPE_CHECKING:
+    from dynamiq.nodes.agents import Agent
+
+
+FINAL_ANSWER_FUNCTION_NAME = "provide_final_answer"
+TAIL_GUARD_SIZE = 16
+STREAMING_SEGMENT_SIZE = 8
+FIND_JSON_FIELD_MAX_OFFSET = 64
+WHITESPACE_PATTERNS = (" ", "\n", "\r", "\t")
+
+
+class DefaultModeTag(str, Enum):
+    """
+    Enumeration of default mode tags.
+    """
+
+    THOUGHT = "Thought:"
+    ACTION = "Action:"
+    ANSWER = "Answer:"
+
+
+class XMLModeTag(str, Enum):
+    """
+    Enumeration of XML mode tags.
+    """
+
+    OPEN_THOUGHT = "<thought>"
+    CLOSE_THOUGHT = "</thought>"
+    OPEN_ACTION = "<action>"
+    CLOSE_ACTION = "</action>"
+    OPEN_ACTION_INPUT = "<action_input>"
+    CLOSE_ACTION_INPUT = "</action_input>"
+    OPEN_ANSWER = "<answer>"
+    CLOSE_ANSWER = "</answer>"
+
+
+class JSONStreamingField(str, Enum):
+    """
+    Enumeration of JSON streaming fields in FUNCTION_CALLING mode.
+    """
+
+    THOUGHT = "thought"
+    ACTION = "action"
+    ACTION_INPUT = "action_input"
+    ANSWER = "answer"
+
+
+class StreamingState(str, Enum):
+    """
+    Enumeration of streaming states.
+    """
+
+    REASONING = "reasoning"
+    ANSWER = "answer"
+    TOOL_INPUT = "tool_input"
+    TOOL_INPUT_START = "tool_input_start"
+
+
+class InferenceMode(str, Enum):
+    """
+    Enumeration of inference types.
+    """
+
+    DEFAULT = "DEFAULT"
+    XML = "XML"
+    FUNCTION_CALLING = "FUNCTION_CALLING"
+    STRUCTURED_OUTPUT = "STRUCTURED_OUTPUT"
+
+
+class BaseStreamingCallbackHandler(BaseCallbackHandler):
+    """Base callback handler for streaming events."""
+
+
+class StreamingQueueCallbackHandler(BaseStreamingCallbackHandler):
+    """Callback handler for streaming events to a queue.
+
+    Attributes:
+        queue (asyncio.Queue | Queue | None): Queue for streaming events.
+        done_event (asyncio.Event | threading.Event | None): Event to signal completion.
+    """
+
+    def __init__(
+        self,
+        queue: asyncio.Queue | Queue | None = None,
+        done_event: asyncio.Event | threading.Event | None = None,
+    ) -> None:
+        """Initialize StreamingQueueCallbackHandler.
+
+        Args:
+            queue (asyncio.Queue | Queue | None): Queue for streaming events.
+            done_event (asyncio.Event | threading.Event | None): Event to signal completion.
+        """
+        self.queue = queue
+        self.done_event = done_event
+
+    def on_workflow_start(
+        self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any
+    ) -> None:
+        """Called when the workflow starts.
+
+        Args:
+            serialized (dict[str, Any]): Serialized workflow data.
+            prompts (list[str]): List of prompts.
+            **kwargs (Any): Additional arguments.
+        """
+        self.done_event.clear()
+
+    def on_node_execute_stream(
+        self, serialized: dict[str, Any], chunk: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        """Called when the node execute streams.
+
+        Args:
+            serialized (dict[str, Any]): Serialized node data.
+            chunk (dict[str, Any] | None): Stream chunk data.
+            **kwargs (Any): Additional arguments.
+        """
+        event = kwargs.get("event") or StreamingEventMessage(
+            run_id=str(get_run_id(kwargs)),
+            wf_run_id=kwargs.get("wf_run_id"),
+            entity_id=serialized.get("id"),
+            data=format_value(chunk),
+            event=serialized.get("streaming", {}).get("event"),
+            source=StreamingEntitySource(
+                id=serialized.get("id"),
+                name=serialized.get("name", None),
+                group=serialized.get("group", None),
+                type=serialized.get("type", None),
+            ),
+        )
+        self.send_to_queue(event)
+
+    def on_workflow_end(
+        self, serialized: dict[str, Any], output_data: dict[str, Any], **kwargs: Any
+    ) -> None:
+        """Called when the workflow ends.
+
+        Args:
+            serialized (dict[str, Any]): Serialized workflow data.
+            output_data (dict[str, Any]): Output data from the workflow.
+            **kwargs (Any): Additional arguments.
+        """
+        event = StreamingEventMessage(
+            run_id=str(get_run_id(kwargs)),
+            wf_run_id=kwargs.get("wf_run_id"),
+            entity_id=serialized.get("id"),
+            data=format_value(output_data),
+            event=serialized.get("streaming", {}).get("event"),
+            source=StreamingEntitySource(
+                id=serialized.get("id"),
+                name=serialized.get("name", None),
+                group=serialized.get("group", None),
+                type=serialized.get("type", None),
+            ),
+        )
+        self.send_to_queue(event)
+        self.done_event.set()
+
+    def on_workflow_error(
+        self, serialized: dict[str, Any], error: BaseException, **kwargs: Any
+    ) -> None:
+        """Called when the workflow errors.
+
+        Args:
+            serialized (dict[str, Any]): Serialized workflow data.
+            error (BaseException): Error encountered.
+            **kwargs (Any): Additional arguments.
+        """
+        event = StreamingEventMessage(
+            run_id=str(get_run_id(kwargs)),
+            wf_run_id=kwargs.get("wf_run_id"),
+            entity_id=serialized.get("id"),
+            data={"error": str(error)},
+            event=serialized.get("streaming", {}).get("event"),
+            source=StreamingEntitySource(
+                id=serialized.get("id"),
+                name=serialized.get("name", None),
+                group=serialized.get("group", None),
+                type=serialized.get("type", None),
+            ),
+        )
+        self.send_to_queue(event)
+        self.done_event.set()
+
+    def on_workflow_canceled(self, serialized: dict[str, Any], **kwargs: Any) -> None:
+        """Called when the workflow is canceled.
+
+        Sends a cancellation event to the queue and signals done so
+        WebSocket/SSE clients don't hang waiting for more events.
+        """
+        name = serialized.get("name", serialized.get("id", "?"))
+        event = StreamingEventMessage(
+            run_id=str(get_run_id(kwargs)),
+            wf_run_id=kwargs.get("wf_run_id"),
+            entity_id=serialized.get("id"),
+            data={
+                "canceled": True,
+                "error": {"message": f"Workflow '{name}' was canceled during execution"},
+            },
+            event=serialized.get("streaming", {}).get("event"),
+            source=StreamingEntitySource(
+                id=serialized.get("id"),
+                name=serialized.get("name", None),
+                group=serialized.get("group", None),
+                type=serialized.get("type", None),
+            ),
+        )
+        self.send_to_queue(event)
+        self.done_event.set()
+
+    def send_to_queue(self, event: StreamingEventMessage):
+        """Send the event to the queue."""
+        self.queue.put_nowait(event)
+
+
+class StreamingIteratorCallbackHandler(StreamingQueueCallbackHandler):
+    """Callback handler for streaming events using an iterator."""
+
+    def __init__(
+        self,
+        queue: Queue | None = None,
+        done_event: threading.Event | None = None,
+    ) -> None:
+        """Initialize StreamingIteratorCallbackHandler.
+
+        Args:
+            queue (Queue | None): Queue for streaming events.
+            done_event (threading.Event | None): Event to signal completion.
+        """
+        if queue is None:
+            queue = Queue()
+        if done_event is None:
+            done_event = threading.Event()
+        super().__init__(queue, done_event)
+        self._iterator = self._iter_queue_events()
+
+    def _iter_queue_events(self) -> Iterator[StreamingEventMessage]:
+        """Iterate over queue events.
+
+        Returns:
+            Iterator[StreamingEventMessage]: Iterator for streaming events.
+        """
+        try:
+            while not self.queue.empty() or not self.done_event.is_set():
+                event = self.queue.get()
+                yield event
+        except Exception as e:
+            logger.error(f"Event streaming failed. Error: {e}")
+
+    def __next__(self) -> StreamingEventMessage:
+        """Get the next streaming event.
+
+        Returns:
+            StreamingEventMessage: Next streaming event.
+        """
+        return self._iterator.__next__()
+
+    def __iter__(self) -> Iterator[StreamingEventMessage]:
+        """Get the iterator for streaming events.
+
+        Returns:
+            Iterator[StreamingEventMessage]: Iterator for streaming events.
+        """
+        yield from self._iterator
+
+
+class AsyncStreamingIteratorCallbackHandler(StreamingQueueCallbackHandler):
+    """Callback handler for streaming events using an async iterator."""
+
+    def __init__(
+        self,
+        queue: asyncio.Queue | None = None,
+        done_event: asyncio.Event | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        """Initialize AsyncStreamingIteratorCallbackHandler.
+
+        Args:
+            queue (asyncio.Queue | None): Queue for streaming events.
+            done_event (asyncio.Event | None): Event to signal completion.
+            loop (asyncio.AbstractEventLoop | None): Event loop.
+        """
+        if queue is None:
+            queue = asyncio.Queue()
+        if done_event is None:
+            done_event = asyncio.Event()
+        super().__init__(queue, done_event)
+        self._iterator = self._iter_queue_events()
+        self.loop = loop or asyncio.get_event_loop()
+
+    def send_to_queue(self, event: StreamingEventMessage):
+        """Send the event to the queue."""
+        asyncio.run_coroutine_threadsafe(self.queue.put(event), self.loop)
+
+    async def _iter_queue_events(self) -> AsyncIterator[StreamingEventMessage]:
+        """Async iterate over queue events.
+
+        Returns:
+            AsyncIterator[StreamingEventMessage]: Async iterator for streaming events.
+        """
+        try:
+            while not self.queue.empty() or not self.done_event.is_set():
+                event = await self.queue.get()
+                yield event
+        except Exception as e:
+            logger.error(f"Event streaming failed. Error: {e}")
+
+    async def __anext__(self) -> StreamingEventMessage:
+        """Get the next async streaming event.
+
+        Returns:
+            StreamingEventMessage: Next async streaming event.
+        """
+        return await self._iterator.__anext__()
+
+    async def __aiter__(self) -> AsyncIterator[StreamingEventMessage]:
+        """Get the async iterator for streaming events.
+
+        Returns:
+            AsyncIterator[StreamingEventMessage]: Async iterator for streaming events.
+        """
+        async for item in self._iterator:
+            yield item
+
+
+class AgentStreamingParserCallback(BaseStreamingCallbackHandler):
+    """Agent callback that parses LLM streaming output in real time and streams structured chunks.
+
+    This callback attaches to the underlying LLM node (group == 'llms'), incrementally parses the
+    provider streaming chunks to detect logical sections like reasoning and final answer based on
+    the selected inference mode, and forwards the relevant segments via the `stream_content()` API
+    with appropriate `step` labels (reasoning/answer) included.
+    """
+
+    def __init__(self, agent: "Agent", config, loop_num: int, **kwargs):
+        self.agent = agent
+        self.config = config
+        self.loop_num = loop_num
+        self.kwargs = kwargs
+
+        self.accumulated_content: str = ""
+
+        self._buffer: str = ""
+        self._current_state: str | None = None
+        self._state_start_index: int = 0
+        self._state_last_emit_index: int = 0
+        self._answer_started: bool = False
+        self._tool_input_started: bool = False
+        self._current_action_name: str | None = None
+        self._fc_object_tool_input: bool = False
+        self._brace_depth: int = 0
+        self._brace_scan_index: int = 0
+        self._so_action_emitted: bool = False
+        self._state_has_emitted: dict[str, bool] = {
+            StreamingState.REASONING: False,
+            StreamingState.ANSWER: False,
+            StreamingState.TOOL_INPUT: False,
+        }
+
+        # Accumulation buffer for min_chunk_chars
+        self._chunk_buffer: str = ""
+        self._chunk_buffer_step: str | None = None
+
+        # Set a tail guard to avoid streaming parts of the next tag that may arrive in next chunk
+        self._tail_guard: int = TAIL_GUARD_SIZE
+
+        # Tracks current tool call index for parallel function calling
+        self._fc_current_index: int = -1
+
+        self.mode_name = getattr(self.agent.inference_mode, "name", str(self.agent.inference_mode)).upper()
+
+    def on_node_execute_stream(self, serialized: dict[str, Any], chunk: dict[str, Any] | None = None, **kwargs: Any):
+        if not chunk or not self.agent.streaming.enabled:
+            return
+
+        # Only process the chunks from the LLM node
+        if serialized.get("group") != "llms":
+            return
+
+        agent_run_id = kwargs.get("run_id") or kwargs.get("parent_run_id")
+        if agent_run_id and serialized.get("id") != getattr(self.agent, "llm", object()).id:
+            return
+
+        if self.mode_name == InferenceMode.FUNCTION_CALLING.value:
+            text_delta, function_name, tc_index = self._extract_function_calling_text(chunk)
+            if tc_index != self._fc_current_index:
+                if self._fc_current_index != -1:
+                    self._reset_tool_call_state()
+                self._fc_current_index = tc_index
+
+            if function_name and function_name == FINAL_ANSWER_FUNCTION_NAME:
+                self._answer_started = True
+            elif function_name:
+                self._tool_input_started = True
+                self._current_action_name = self.agent.sanitize_tool_name(function_name)
+                new_id = generate_uuid()
+                self.agent._streaming_tool_run_id = new_id
+                self.agent._streaming_tool_run_ids.append(new_id)
+        else:
+            text_delta = self._extract_text_delta(chunk)
+
+        if not text_delta:
+            return
+
+        self.accumulated_content += text_delta
+        self._buffer += text_delta
+
+        final_answer_only = self.agent.streaming.mode == StreamingMode.FINAL
+
+        if self.mode_name == InferenceMode.DEFAULT.value:
+            self._process_default_mode(final_answer_only)
+        elif self.mode_name == InferenceMode.XML.value:
+            self._process_xml_mode(final_answer_only)
+        elif self.mode_name == InferenceMode.STRUCTURED_OUTPUT.value:
+            self._process_structured_output_mode(final_answer_only)
+        elif self.mode_name == InferenceMode.FUNCTION_CALLING.value:
+            self._process_function_calling_mode(final_answer_only)
+
+        self._trim_buffer()
+
+    def on_node_execute_end(self, serialized: dict[str, Any], output_data: dict[str, Any], **kwargs: Any):
+        # Clear the remaining buffer content when the LLM streaming ends
+        if serialized.get("group") != "llms":
+            return
+
+        if not self.agent.streaming.enabled:
+            return
+
+        self._flush_buffer()
+        self._trim_buffer(force=True)
+
+    def _flush_buffer(self) -> None:
+        """Flush the remaining buffer content by streaming it as one chunk."""
+        if not self._buffer or len(self._buffer) <= self._state_last_emit_index:
+            self._flush_chunk_buffer()
+            return
+
+        if self._current_state in (StreamingState.REASONING, StreamingState.ANSWER, StreamingState.TOOL_INPUT):
+            remaining_content = self._buffer[self._state_last_emit_index :]
+            if remaining_content.strip():
+                self._emit(remaining_content, step=self._current_state)
+                self._state_last_emit_index = len(self._buffer)
+        self._flush_chunk_buffer()
+
+    def _reset_tool_call_state(self) -> None:
+        """Reset parser state for a new tool call in parallel function calling."""
+        self._flush_buffer()
+        self._buffer = ""
+        self._current_state = None
+        self._state_start_index = 0
+        self._state_last_emit_index = 0
+        self._tool_input_started = False
+        self._answer_started = False
+        self._current_action_name = None
+        self._fc_object_tool_input = False
+        self._brace_depth = 0
+        self._brace_scan_index = 0
+        self._state_has_emitted = {
+            StreamingState.REASONING: False,
+            StreamingState.ANSWER: False,
+            StreamingState.TOOL_INPUT: False,
+        }
+
+    def _extract_text_delta(self, chunk: dict[str, Any]) -> str:
+        """Extract textual content from streaming chunk received from the LLM.
+
+        Returns:
+            str: The extracted content.
+        """
+        extracted_content = ""
+
+        choices = chunk.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta", {})
+            content = delta.get("content")
+            if isinstance(content, str):
+                extracted_content = content
+
+        if not extracted_content and isinstance(chunk.get("content"), str):
+            extracted_content = chunk.get("content")
+
+        return extracted_content
+
+    def _extract_function_calling_text(self, chunk: dict[str, Any]) -> tuple[str, str | None, int]:
+        """
+        Extract incremental JSON values (arguments), function name, and tool call index
+        from the LLM streaming chunks in FUNCTION_CALLING inference mode.
+
+        Returns:
+            tuple[str, str | None, int]: (arguments_text, function_name, tool_call_index)
+        """
+        arguments_text = ""
+        function_name = None
+        tc_index = self._fc_current_index if self._fc_current_index != -1 else 0
+
+        choices = chunk.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta", {})
+            tool_calls = delta.get("tool_calls")
+
+            if tool_calls and len(tool_calls) > 0:
+                tool_call = tool_calls[0]
+                tc_index = tool_call.get("index", 0)
+                if tool_call.get("type") == "function" and "function" in tool_call:
+                    function_data = tool_call["function"]
+
+                    if function_data.get("name"):
+                        function_name = function_data["name"]
+
+                    if function_data.get("arguments"):
+                        arguments_text = function_data["arguments"]
+
+        return arguments_text, function_name, tc_index
+
+    def _resolve_tool_data(self) -> AgentToolData:
+        """Resolve the current action name to an AgentToolData instance."""
+        action_name = self._current_action_name or ""
+        sanitized = self.agent.sanitize_tool_name(action_name)
+        tool = self.agent.tool_by_names.get(sanitized)
+        if tool:
+            return AgentToolData(
+                name=tool.name,
+                type=tool.type,
+                action_type=tool.action_type.value if tool.action_type else None,
+            )
+        return AgentToolData(name=action_name, type="unknown")
+
+    def _flush_chunk_buffer(self) -> None:
+        """Flush the accumulated chunk buffer, emitting whatever is buffered."""
+        if self._chunk_buffer and self._chunk_buffer_step:
+            self._emit(self._chunk_buffer, step=self._chunk_buffer_step, force=True)
+        self._chunk_buffer = ""
+        self._chunk_buffer_step = None
+
+    def _emit(self, content: str, step: str, force: bool = False) -> None:
+        """Emit the parsed content using the agent's stream_content method.
+
+        Args:
+            content (str): The content to stream.
+            step (str): The step to stream the content to.
+            force (bool): If True, skip min_chunk_chars accumulation.
+        """
+        if not content:
+            return
+
+        # Skip streaming if in FINAL mode and not in answer step
+        if self.agent.streaming.mode == StreamingMode.FINAL and step != StreamingState.ANSWER:
+            return
+
+        # Skip tool input streaming if not in the allowlist
+        if step == StreamingState.TOOL_INPUT:
+            allowed = self.agent.streaming.stream_tool_input
+            if allowed is not None:
+                raw_name = self._current_action_name or ""
+                sanitized_name = self.agent.sanitize_tool_name(raw_name)
+                if raw_name not in allowed and sanitized_name not in allowed:
+                    return
+
+        if step in self._state_has_emitted:
+            if not self._state_has_emitted[step]:
+                trimmed = content.lstrip("\r\n ")
+                if not trimmed:
+                    return
+                content = trimmed
+
+        # Accumulate small chunks if min_chunk_chars is set
+        min_chars = self.agent.streaming.min_chunk_chars
+        if min_chars > 0 and not force:
+            # Flush previous step's buffer before starting a new step
+            if self._chunk_buffer_step and self._chunk_buffer_step != step:
+                self._flush_chunk_buffer()
+
+        # Emit tool_input_start after flushing previous step but before accumulation
+        if step == StreamingState.TOOL_INPUT and not self._state_has_emitted.get(StreamingState.TOOL_INPUT, False):
+            self._emit_tool_input_start()
+
+        if min_chars > 0 and not force:
+            self._chunk_buffer += content
+            self._chunk_buffer_step = step
+            if step in self._state_has_emitted:
+                self._state_has_emitted[step] = True
+            if len(self._chunk_buffer) < min_chars:
+                return
+            content = self._chunk_buffer
+            self._chunk_buffer = ""
+            self._chunk_buffer_step = None
+
+        # Format content based on the step type
+        if step == StreamingState.REASONING:
+            thought_model = StreamingThought(thought=content)
+            content_to_stream = thought_model.to_dict()
+        elif step == StreamingState.TOOL_INPUT:
+            delta_model = AgentToolInputDeltaData(
+                tool_run_id=self.agent._streaming_tool_run_id or "",
+                action_input=content,
+            )
+            content_to_stream = delta_model.model_dump()
+        elif step == StreamingState.ANSWER:
+            content_to_stream = content
+        else:
+            content_to_stream = content
+
+        self.agent.stream_content(
+            content=content_to_stream,
+            source=self.agent.name,
+            step=step,
+            config=self.config,
+            **(self.kwargs | {"loop_num": self.loop_num}),
+        )
+        if step in self._state_has_emitted:
+            self._state_has_emitted[step] = True
+
+    def _emit_tool_input_start(self) -> None:
+        """Emit a tool_input start event with full metadata before the first delta."""
+        tool_data = self._resolve_tool_data()
+        start_model = AgentToolInputStartData(
+            tool_run_id=self.agent._streaming_tool_run_id or "",
+            action=self._current_action_name or "",
+            tool=tool_data,
+            loop_num=self.loop_num,
+        )
+        self.agent.stream_content(
+            content=start_model.model_dump(),
+            source=self.agent.name,
+            step=StreamingState.TOOL_INPUT_START,
+            config=self.config,
+            **(self.kwargs | {"loop_num": self.loop_num}),
+        )
+
+    def _process_default_mode(self, final_answer_only: bool) -> None:
+        if self._current_state is None:
+            start = self._state_last_emit_index
+            idx_thought = self._buffer.find(DefaultModeTag.THOUGHT, start) if not final_answer_only else -1
+            idx_answer = self._buffer.find(DefaultModeTag.ANSWER, start)
+
+            if not final_answer_only and idx_thought != -1 and (idx_answer == -1 or idx_thought < idx_answer):
+                self._current_state = StreamingState.REASONING
+                self._state_start_index = idx_thought + len(DefaultModeTag.THOUGHT)
+                self._state_last_emit_index = self._state_start_index
+            elif idx_answer != -1:
+                self._current_state = StreamingState.ANSWER
+                self._answer_started = True
+                self._state_start_index = idx_answer + len(DefaultModeTag.ANSWER)
+                self._state_last_emit_index = self._state_start_index
+
+        # If the state was not detected, nothing to emit yet
+        if self._current_state is None:
+            return
+
+        search_start = self._state_last_emit_index
+
+        if self._current_state == StreamingState.REASONING:
+            # Check if there is a transition to Action or Answer
+            next_tag_pos = -1
+            next_tag_name = None
+            for tag_text, name in ((DefaultModeTag.ACTION, "action"), (DefaultModeTag.ANSWER, "answer")):
+                pos = self._buffer.find(tag_text, search_start)
+                if pos != -1 and (next_tag_pos == -1 or pos < next_tag_pos):
+                    next_tag_pos, next_tag_name = pos, name
+
+            if next_tag_pos != -1:
+                # If a complete next tag is found, emit everything up to it
+                if next_tag_pos > self._state_last_emit_index:
+                    self._emit(self._buffer[self._state_last_emit_index : next_tag_pos], step=StreamingState.REASONING)
+                if next_tag_name == "answer":
+                    self._current_state = StreamingState.ANSWER
+                    self._answer_started = True
+                    self._state_start_index = next_tag_pos + len(DefaultModeTag.ANSWER)
+                    self._state_last_emit_index = self._state_start_index
+                else:
+                    # Wait for the next state after `action`
+                    self._current_state = None
+                    self._state_last_emit_index = next_tag_pos + len(DefaultModeTag.ACTION)
+                return
+
+            # If there is no next tag yet, emit incrementally using a tail guard
+            safe_end = max(self._state_last_emit_index, len(self._buffer) - self._tail_guard)
+            if safe_end > self._state_last_emit_index:
+                self._emit(self._buffer[self._state_last_emit_index : safe_end], step=StreamingState.REASONING)
+                self._state_last_emit_index = safe_end
+            return
+
+        # If the current state is 'answer', stream up to the end
+        safe_end = max(self._state_last_emit_index, len(self._buffer) - self._tail_guard)
+        if safe_end > self._state_last_emit_index:
+            self._emit(self._buffer[self._state_last_emit_index : safe_end], step=StreamingState.ANSWER)
+            self._state_last_emit_index = safe_end
+
+    def _process_xml_mode(self, final_answer_only: bool) -> None:
+        if self._current_state is None:
+            start = self._state_last_emit_index
+
+            # Extract action name from <action>...</action> if visible in buffer
+            if self._current_action_name is None:
+                close_action_pos = self._buffer.find(XMLModeTag.CLOSE_ACTION, start)
+                if close_action_pos != -1:
+                    open_action_pos = self._buffer.rfind(XMLModeTag.OPEN_ACTION, 0, close_action_pos)
+                    if open_action_pos != -1:
+                        self._current_action_name = self._buffer[
+                            open_action_pos + len(XMLModeTag.OPEN_ACTION) : close_action_pos
+                        ].strip()
+                    self._state_last_emit_index = close_action_pos + len(XMLModeTag.CLOSE_ACTION)
+                    start = self._state_last_emit_index
+
+            idx_thought = self._buffer.find(XMLModeTag.OPEN_THOUGHT, start) if not final_answer_only else -1
+            idx_answer = self._buffer.find(XMLModeTag.OPEN_ANSWER, start)
+            idx_action_input = (
+                self._buffer.find(XMLModeTag.OPEN_ACTION_INPUT, start)
+                if not final_answer_only
+                and self._current_action_name
+                else -1
+            )
+
+            if (
+                not final_answer_only
+                and idx_thought != -1
+                and (idx_answer == -1 or idx_thought < idx_answer)
+                and (idx_action_input == -1 or idx_thought < idx_action_input)
+            ):
+                self._current_action_name = None
+                self._current_state = StreamingState.REASONING
+                self._state_start_index = idx_thought + len(XMLModeTag.OPEN_THOUGHT)
+                self._state_last_emit_index = self._state_start_index
+            elif idx_action_input != -1 and (idx_answer == -1 or idx_action_input < idx_answer):
+                self._current_state = StreamingState.TOOL_INPUT
+                self.agent._streaming_tool_run_id = generate_uuid()
+                self._state_has_emitted[StreamingState.TOOL_INPUT] = False
+                self._state_start_index = idx_action_input + len(XMLModeTag.OPEN_ACTION_INPUT)
+                self._state_last_emit_index = self._state_start_index
+            elif idx_answer != -1:
+                self._current_state = StreamingState.ANSWER
+                self._answer_started = True
+                self._state_start_index = idx_answer + len(XMLModeTag.OPEN_ANSWER)
+                self._state_last_emit_index = self._state_start_index
+
+        if self._current_state is None:
+            return
+
+        search_start = self._state_last_emit_index
+
+        if self._current_state == StreamingState.REASONING:
+            # Check for the next boundary: either </thought>, <action>, or <answer>
+            next_pos = -1
+            next_tag = None
+            for tag in (XMLModeTag.CLOSE_THOUGHT, XMLModeTag.OPEN_ACTION, XMLModeTag.OPEN_ANSWER):
+                pos = self._buffer.find(tag, search_start)
+                if pos != -1 and (next_pos == -1 or pos < next_pos):
+                    next_pos, next_tag = pos, tag
+
+            if next_pos != -1:
+                # Emit everything up to the next tag
+                if next_pos > self._state_last_emit_index:
+                    self._emit(self._buffer[self._state_last_emit_index : next_pos], step=StreamingState.REASONING)
+
+                if next_tag == XMLModeTag.OPEN_ANSWER:
+                    self._current_state = StreamingState.ANSWER
+                    self._answer_started = True
+                    self._state_start_index = next_pos + len(XMLModeTag.OPEN_ANSWER)
+                    self._state_last_emit_index = self._state_start_index
+                else:
+                    # Stop reasoning stream due to either </thought> or <action>
+                    self._current_state = None
+                    self._state_last_emit_index = next_pos + len(next_tag)
+                return
+
+            # If there is no next tag yet, emit incrementally using a tail guard
+            safe_end = max(self._state_last_emit_index, len(self._buffer) - self._tail_guard)
+            if safe_end > self._state_last_emit_index:
+                self._emit(self._buffer[self._state_last_emit_index : safe_end], step=StreamingState.REASONING)
+                self._state_last_emit_index = safe_end
+            return
+
+        # If the current state is 'answer', stream up to the </answer> tag
+        if self._current_state == StreamingState.ANSWER:
+            end_pos = self._buffer.find(XMLModeTag.CLOSE_ANSWER, search_start)
+            if end_pos != -1:
+                if end_pos > self._state_last_emit_index:
+                    self._emit(self._buffer[self._state_last_emit_index : end_pos], step=StreamingState.ANSWER)
+                self._current_state = None
+                self._state_last_emit_index = end_pos + len(XMLModeTag.CLOSE_ANSWER)
+                return
+
+            safe_end = max(self._state_last_emit_index, len(self._buffer) - self._tail_guard)
+            if safe_end > self._state_last_emit_index:
+                self._emit(self._buffer[self._state_last_emit_index : safe_end], step=StreamingState.ANSWER)
+                self._state_last_emit_index = safe_end
+            return
+
+        if self._current_state == StreamingState.TOOL_INPUT:
+            end_pos = self._buffer.find(XMLModeTag.CLOSE_ACTION_INPUT, search_start)
+            if end_pos != -1:
+                if end_pos > self._state_last_emit_index:
+                    self._emit(self._buffer[self._state_last_emit_index : end_pos], step=StreamingState.TOOL_INPUT)
+                self._current_state = None
+                self._current_action_name = None
+                self._state_last_emit_index = end_pos + len(XMLModeTag.CLOSE_ACTION_INPUT)
+                return
+
+            safe_end = max(self._state_last_emit_index, len(self._buffer) - self._tail_guard)
+            if safe_end > self._state_last_emit_index:
+                self._emit(self._buffer[self._state_last_emit_index : safe_end], step=StreamingState.TOOL_INPUT)
+                self._state_last_emit_index = safe_end
+
+    def _process_structured_output_mode(self, final_answer_only: bool) -> None:
+        """Process structured output mode.
+
+        Structured output produces exactly one JSON object per LLM loop with a single
+        thought + action cycle.  Once the action field (tool_input or answer) has been
+        fully emitted, further content is ignored so that a malformed response containing
+        a second thought/action pair is not streamed.
+        """
+        if self._so_action_emitted:
+            return
+
+        buf = self._buffer
+
+        if not self._answer_started and not self._tool_input_started:
+            action_key_pos = buf.find(
+                f'"{JSONStreamingField.ACTION.value}"', max(0, self._state_last_emit_index - FIND_JSON_FIELD_MAX_OFFSET)
+            )
+            if action_key_pos != -1:
+                colon_pos = buf.find(":", action_key_pos)
+                if colon_pos != -1:
+                    v_start = self._skip_whitespace(buf, colon_pos + 1)
+                    if v_start < len(buf) and buf[v_start] == '"':
+                        end_quote = self._find_unescaped_quote_end(buf, v_start)
+                        if end_quote != -1:
+                            action_value = buf[v_start + 1 : end_quote]
+                            if action_value.strip().lower() == "finish":
+                                self._answer_started = True
+                                if self._current_state is None:
+                                    action_input_start = self._find_field_string_value_start(
+                                        buf, JSONStreamingField.ACTION_INPUT.value, end_quote + 1
+                                    )
+                                    if action_input_start != -1:
+                                        self._current_state = StreamingState.ANSWER
+                                        self._state_start_index = action_input_start
+                                        self._state_last_emit_index = max(
+                                            self._state_last_emit_index, action_input_start
+                                        )
+                            else:
+                                self._tool_input_started = True
+                                self._current_action_name = action_value.strip()
+                                self.agent._streaming_tool_run_id = generate_uuid()
+                                if self._current_state is None:
+                                    action_input_start = self._find_field_string_value_start(
+                                        buf, JSONStreamingField.ACTION_INPUT.value, end_quote + 1
+                                    )
+                                    if action_input_start != -1:
+                                        self._current_state = StreamingState.TOOL_INPUT
+                                        self._state_start_index = action_input_start
+                                        self._state_last_emit_index = max(
+                                            self._state_last_emit_index, action_input_start
+                                        )
+
+        if not self._state_has_emitted.get(StreamingState.REASONING, False):
+            self._initialize_json_field_state(
+                buf, JSONStreamingField.THOUGHT.value, StreamingState.REASONING, final_answer_only
+            )
+
+        if self._answer_started:
+            self._initialize_json_field_state(buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.ANSWER)
+
+        if self._tool_input_started and not self._answer_started:
+            self._initialize_json_field_state(buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.TOOL_INPUT)
+
+        if self._current_state == StreamingState.REASONING:
+            if self._emit_json_field_content(buf, StreamingState.REASONING):
+                # Reasoning completed — immediately try to initialize ANSWER/TOOL_INPUT
+                # in the same call, in case this is the last chunk.
+                if self._answer_started:
+                    self._initialize_json_field_state(buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.ANSWER)
+                elif self._tool_input_started:
+                    self._initialize_json_field_state(
+                        buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.TOOL_INPUT
+                    )
+
+        if self._current_state == StreamingState.ANSWER:
+            if self._emit_json_field_content(buf, StreamingState.ANSWER):
+                self._so_action_emitted = True
+        elif self._current_state == StreamingState.TOOL_INPUT:
+            if self._emit_json_field_content(buf, StreamingState.TOOL_INPUT):
+                self._so_action_emitted = True
+
+    def _process_function_calling_mode(self, final_answer_only: bool) -> None:
+        """Process function calling mode."""
+        self._process_json_mode(final_answer_only)
+
+    def _find_unescaped_quote_end(self, input_string: str, start_quote_index: int) -> int:
+        """
+        Return index of the next unescaped '"' after start_quote_index, or -1 if not complete yet.
+
+        Args:
+            input_string (str): The string to search in.
+            start_quote_index (int): The index of the starting quote.
+
+        Returns:
+            int: The index of the next unescaped quote, or -1 if not found.
+        """
+        current_index = start_quote_index + 1
+        while current_index < len(input_string):
+            if input_string[current_index] == '"':
+                # Count preceding backslashes
+                backslash_count = 0
+                previous_index = current_index - 1
+                while previous_index >= 0 and input_string[previous_index] == "\\":
+                    backslash_count += 1
+                    previous_index -= 1
+                if backslash_count % 2 == 0:
+                    return current_index
+            current_index += 1
+        return -1
+
+    def _find_field_string_value_start(self, input_string: str, field_name: str, start_index: int = 0) -> int:
+        """
+        Find the index of the first character inside the opening quote of a string field value.
+        Returns -1 if field or opening quote is not fully present yet.
+
+        Args:
+            input_string (str): The string to search in.
+            field_name (str): The name of the field to search for.
+            start_index (int): The index to start searching from.
+
+        Returns:
+            int: The index of the first character inside the opening quote of the string field value,
+                 or -1 if not found.
+        """
+        key = f'"{field_name}"'
+        position = input_string.find(key, start_index)
+        if position == -1:
+            return -1
+
+        colon_index = input_string.find(":", position + len(key))
+        if colon_index == -1:
+            return -1
+
+        # Skip the whitespace after the colon
+        index = colon_index + 1
+        while index < len(input_string) and input_string[index] in WHITESPACE_PATTERNS:
+            index += 1
+        if index >= len(input_string) or input_string[index] != '"':
+            return -1
+        return index + 1
+
+    def _find_field_object_value_start(self, input_string: str, field_name: str, start_index: int = 0) -> int:
+        """
+        Find the index of the opening brace of an object field value.
+        Returns -1 if field or opening brace is not fully present yet.
+
+        Args:
+            input_string: The string to search in.
+            field_name: The name of the field to search for.
+            start_index: The index to start searching from.
+
+        Returns:
+            int: The index of the opening brace, or -1 if not found.
+        """
+        key = f'"{field_name}"'
+        position = input_string.find(key, start_index)
+        if position == -1:
+            return -1
+
+        colon_index = input_string.find(":", position + len(key))
+        if colon_index == -1:
+            return -1
+
+        index = colon_index + 1
+        while index < len(input_string) and input_string[index] in WHITESPACE_PATTERNS:
+            index += 1
+        if index >= len(input_string) or input_string[index] != "{":
+            return -1
+        return index
+
+    def _initialize_json_field_state(
+        self, buf: str, field_name: str, state: str, final_answer_only: bool = False
+    ) -> bool:
+        """
+        Initialize streaming state for a JSON field if not already set.
+
+        Args:
+            buf: Buffer containing JSON content
+            field_name: Name of the JSON field to look for
+            state: State to set if field is found ("reasoning" or "answer")
+            final_answer_only: Whether we're in final answer only mode
+
+        Returns:
+            bool: True if state was initialized, False otherwise
+        """
+        if self._current_state is not None:
+            return False
+
+        # Skip reasoning fields in final answer only mode
+        if final_answer_only and state == StreamingState.REASONING:
+            return False
+
+        field_start = self._find_field_string_value_start(
+            buf, field_name, max(0, self._state_last_emit_index - FIND_JSON_FIELD_MAX_OFFSET)
+        )
+
+        # If the field is found, set the state and indices
+        if field_start != -1:
+            self._current_state = state
+            self._state_start_index = field_start
+            self._state_last_emit_index = max(self._state_last_emit_index, field_start)
+            return True
+        return False
+
+    def _initialize_json_object_field_state(self, buf: str, field_name: str, state: str) -> bool:
+        """
+        Initialize streaming state for a JSON object field (brace-delimited).
+
+        Args:
+            buf: Buffer containing JSON content
+            field_name: Name of the JSON field to look for
+            state: State to set if field is found
+
+        Returns:
+            bool: True if state was initialized, False otherwise
+        """
+        if self._current_state is not None:
+            return False
+
+        field_start = self._find_field_object_value_start(
+            buf, field_name, max(0, self._state_last_emit_index - FIND_JSON_FIELD_MAX_OFFSET)
+        )
+
+        if field_start != -1:
+            self._current_state = state
+            self._state_start_index = field_start
+            self._state_last_emit_index = max(self._state_last_emit_index, field_start)
+            self._fc_object_tool_input = True
+            self._brace_depth = 1
+            self._brace_scan_index = field_start + 1
+            return True
+        return False
+
+    def _try_initialize_next_json_field(self, buf: str, final_answer_only: bool) -> None:
+        """Try to initialize the next JSON field state (thought, answer, or action_input).
+
+        Each initializer is a no-op when _current_state is already set, so this is safe
+        to call multiple times within a single chunk processing cycle.
+        """
+        if not self._state_has_emitted.get(StreamingState.REASONING, False):
+            self._initialize_json_field_state(
+                buf, JSONStreamingField.THOUGHT.value, StreamingState.REASONING, final_answer_only
+            )
+
+        if self._answer_started:
+            self._initialize_json_field_state(buf, JSONStreamingField.ANSWER.value, StreamingState.ANSWER)
+
+        if self._tool_input_started and not self._answer_started:
+            if not self._initialize_json_field_state(
+                buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.TOOL_INPUT
+            ):
+                if self._current_state is None:
+                    self._initialize_json_object_field_state(
+                        buf, JSONStreamingField.ACTION_INPUT.value, StreamingState.TOOL_INPUT
+                    )
+
+    def _emit_tool_input_state(self, buf: str) -> None:
+        """Emit content for the current TOOL_INPUT state."""
+        if self._fc_object_tool_input:
+            self._emit_json_object_field_content(buf, StreamingState.TOOL_INPUT)
+        else:
+            self._emit_json_field_content(buf, StreamingState.TOOL_INPUT)
+
+    def _process_json_mode(self, final_answer_only: bool) -> None:
+        """
+        Processing for function calling mode.
+
+        Supports multiple tool calls (parallel function calling) — no single-cycle
+        constraint is enforced here, unlike structured output mode.
+
+        Args:
+            final_answer_only: Whether to stream only final answers
+        """
+        buf = self._buffer
+
+        self._try_initialize_next_json_field(buf, final_answer_only)
+
+        if self._current_state == StreamingState.REASONING:
+            field_complete = self._emit_json_field_content(buf, StreamingState.REASONING)
+            if field_complete:
+                # Reasoning completed — the buffer may already contain the next field
+                # (e.g. action_input). Re-run to detect and process it in the same chunk,
+                # before _reset_tool_call_state clears the buffer on the next parallel call.
+                self._process_json_mode(final_answer_only)
+        elif self._current_state == StreamingState.ANSWER:
+            self._emit_json_field_content(buf, StreamingState.ANSWER)
+        elif self._current_state == StreamingState.TOOL_INPUT:
+            self._emit_tool_input_state(buf)
+
+    def _skip_whitespace(self, text: str, start: int) -> int:
+        """Skip whitespace characters starting from the given position."""
+        while start < len(text) and text[start] in WHITESPACE_PATTERNS:
+            start += 1
+        return start
+
+    def _emit_json_field_content(self, buf: str, step: str) -> bool:
+        """
+        Emit JSON field content in segments, handling complete and partial values.
+
+        Args:
+            buf: Buffer containing the JSON content
+            step: The streaming step ("reasoning" or "answer")
+
+        Returns:
+            bool: True if field is complete and state should be reset, False otherwise
+        """
+        # Find the closing quote of the current JSON field
+        end_quote = self._find_unescaped_quote_end(buf, self._state_start_index - 1)
+        if end_quote != -1:
+            # If the field is complete, emit it
+            if end_quote > self._state_last_emit_index:
+                segment_start = self._state_last_emit_index
+                while segment_start < end_quote:
+                    segment_end = min(end_quote, segment_start + STREAMING_SEGMENT_SIZE)
+                    self._emit(buf[segment_start:segment_end], step=step)
+                    segment_start = segment_end
+                self._state_last_emit_index = end_quote
+            # Mark the field as emitted and reset the state
+            if step in self._state_has_emitted:
+                self._state_has_emitted[step] = True
+            self._current_state = None
+            return True
+
+        # Emit incrementally if the field is not complete
+        if len(buf) > self._state_last_emit_index:
+            segment_start = self._state_last_emit_index
+            segment_end_target = len(buf)
+            while segment_start < segment_end_target:
+                segment_end = min(segment_end_target, segment_start + STREAMING_SEGMENT_SIZE)
+                self._emit(buf[segment_start:segment_end], step=step)
+                segment_start = segment_end
+            self._state_last_emit_index = segment_end_target
+        return False
+
+    def _emit_json_object_field_content(self, buf: str, step: str) -> bool:
+        """
+        Emit JSON object field content using brace counting to find the object boundary.
+        Handles nested objects and strings correctly by tracking brace depth across calls.
+
+        Args:
+            buf: Buffer containing the JSON content
+            step: The streaming step (e.g. "tool_input")
+
+        Returns:
+            bool: True if the object is complete, False otherwise.
+        """
+        i = self._brace_scan_index
+        while i < len(buf):
+            ch = buf[i]
+            if ch == '"':
+                end = self._find_unescaped_quote_end(buf, i)
+                if end == -1:
+                    break
+                i = end + 1
+                continue
+            if ch == "{":
+                self._brace_depth += 1
+            elif ch == "}":
+                self._brace_depth -= 1
+                if self._brace_depth == 0:
+                    end_pos = i + 1
+                    if end_pos > self._state_last_emit_index:
+                        segment_start = self._state_last_emit_index
+                        while segment_start < end_pos:
+                            segment_end = min(end_pos, segment_start + STREAMING_SEGMENT_SIZE)
+                            self._emit(buf[segment_start:segment_end], step=step)
+                            segment_start = segment_end
+                        self._state_last_emit_index = end_pos
+                    self._current_state = None
+                    self._brace_scan_index = end_pos
+                    return True
+            i += 1
+        self._brace_scan_index = i
+
+        safe_end = max(self._state_last_emit_index, len(buf) - self._tail_guard)
+        if safe_end > self._state_last_emit_index:
+            segment_start = self._state_last_emit_index
+            while segment_start < safe_end:
+                segment_end = min(safe_end, segment_start + STREAMING_SEGMENT_SIZE)
+                self._emit(buf[segment_start:segment_end], step=step)
+                segment_start = segment_end
+            self._state_last_emit_index = safe_end
+        return False
+
+    def _trim_buffer(self, force: bool = False) -> None:
+        """Trim already-emitted prefix of buffer to prevent re-detection."""
+        if not self._buffer:
+            return
+
+        if self.mode_name == InferenceMode.STRUCTURED_OUTPUT.value:
+            return
+
+        if force:
+            keep_from = self._state_last_emit_index
+        else:
+            if (
+                self._current_state in (StreamingState.REASONING, StreamingState.ANSWER, StreamingState.TOOL_INPUT)
+                and self._state_start_index != -1
+            ):
+                keep_from = max(0, min(self._state_last_emit_index - self._tail_guard, self._state_start_index - 1))
+            else:
+                keep_from = max(0, self._state_last_emit_index - self._tail_guard)
+        if keep_from <= 0:
+            return
+        self._buffer = self._buffer[keep_from:]
+
+        # Rebase the indices
+        self._state_start_index = max(0, self._state_start_index - keep_from)
+        self._state_last_emit_index = max(0, self._state_last_emit_index - keep_from)
+        self._brace_scan_index = max(0, self._brace_scan_index - keep_from)

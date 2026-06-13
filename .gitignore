@@ -1,0 +1,120 @@
+# ---------- Node ----------
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.pnp.*
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Next.js ----------
+.next/
+out/
+.vercel
+next-env.d.ts
+
+# ---------- Build output ----------
+dist/
+build/
+*.tsbuildinfo
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+.installed.cfg
+develop-eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+poetry.lock.bak
+
+# ---------- Virtual envs ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Testing ----------
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.cache/
+.hypothesis/
+coverage.xml
+*.cover
+nosetests.xml
+playwright-report/
+test-results/
+
+# ---------- Type checkers / linters ----------
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.eslintcache
+
+# ---------- Env files ----------
+.env
+.env.*
+!.env.example
+
+# ---------- IDE / OS ----------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.swp
+*.swo
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---------- Docker / compose data ----------
+**/.docker-data/
+docker-data/
+
+# ---------- Misc ----------
+*.bak
+*.tmp
+.tmp/
+*.pid
+*.seed
+*.pid.lock
+
+# ---------- Local AI / editor tooling ----------
+.claude/
+.cursor/
+.aider*
+
+# ---------- Project artifacts (generated, do not commit) ----------
+# Workflow definition backups dumped by the API at runtime
+**/_def_backup_*.json
+**/_*_backup_*.json
+# Generated demo / export reports
+*-Report.pdf
+*_Report.pdf
+_pdf_render_test.pdf
+# Local RAG / vector index + uploaded files
+**/uploads/
+**/storage/
+**/.chroma/
+*.sqlite
+*.sqlite3
+*.db

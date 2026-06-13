@@ -1,0 +1,99 @@
+from typing import Any
+
+from dynamiq.components.retrievers.utils import filter_documents_by_threshold
+from dynamiq.storages.vector import MilvusVectorStore
+from dynamiq.types import Document
+
+
+class MilvusDocumentRetriever:
+    """
+    Document Retriever using Milvus.
+    """
+
+    def __init__(
+        self,
+        *,
+        vector_store: MilvusVectorStore,
+        filters: dict[str, Any] | None = None,
+        top_k: int = 10,
+        similarity_threshold: float | None = None,
+    ):
+        """
+        Initializes a component for retrieving documents from a Milvus vector store with optional filtering.
+
+        Args:
+            vector_store (MilvusVectorStore): An instance of MilvusVectorStore to interface with Milvus vectors.
+            filters (Optional[dict[str, Any]]): Filters to apply for retrieving specific documents. Defaults to None.
+            top_k (int): The maximum number of documents to return. Defaults to 10.
+
+        Raises:
+            ValueError: If the `vector_store` is not an instance of `MilvusVectorStore`.
+        """
+        if not isinstance(vector_store, MilvusVectorStore):
+            raise ValueError("vector_store must be an instance of MilvusVectorStore")
+
+        self.vector_store = vector_store
+        self.filters = filters or {}
+        self.top_k = top_k
+        self.similarity_threshold = similarity_threshold
+
+    def _higher_is_better(self) -> bool:
+        metric = (self.vector_store.metric_type or "").upper()
+        return metric not in {"L2", "EUCLIDEAN"}
+
+    def run(
+        self,
+        query_embedding: list[float],
+        query: str | None = None,
+        exclude_document_embeddings: bool = True,
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        content_key: str | None = None,
+        embedding_key: str | None = None,
+        similarity_threshold: float | None = None,
+    ) -> dict[str, list[Document]]:
+        """
+        Retrieves documents from the MilvusVectorStore that are similar to the provided query embedding.
+
+        Args:
+            query_embedding (List[float]): The embedding vector of the query for which similar documents are to be
+            retrieved.
+            query(Optional[str]): The query string to search for (when using hybrid search). Defaults to None.
+            exclude_document_embeddings (bool, optional): Specifies whether to exclude the embeddings of the retrieved
+            documents from the output.
+            top_k (int, optional): The maximum number of documents to return. Defaults to None.
+            filters (Optional[dict[str, Any]]): Filters to apply for retrieving specific documents. Defaults to None.
+            content_key (Optional[str]): The field used to store content in the storage.
+            embedding_key (Optional[str]): The field used to store vector in the storage.
+
+        Returns:
+            Dict[str, List[Document]]: A dictionary containing a list of Document instances sorted by their relevance
+            to the query_embedding.
+        """
+        query_embeddings = [query_embedding]
+        top_k = top_k or self.top_k
+        filters = filters or self.filters
+
+        if query is not None:
+            docs = self.vector_store._hybrid_retrieval(
+                query=query,
+                query_embeddings=query_embeddings,
+                top_k=top_k,
+                content_key=content_key,
+                embedding_key=embedding_key,
+                return_embeddings=not exclude_document_embeddings,
+            )
+        else:
+            docs = self.vector_store._embedding_retrieval(
+                query_embeddings=query_embeddings,
+                filters=filters,
+                top_k=top_k,
+                content_key=content_key,
+                embedding_key=embedding_key,
+                return_embeddings=not exclude_document_embeddings,
+            )
+
+        threshold = similarity_threshold if similarity_threshold is not None else self.similarity_threshold
+        docs = filter_documents_by_threshold(docs, threshold, higher_is_better=self._higher_is_better())
+
+        return {"documents": docs}

@@ -1,0 +1,1272 @@
+from concurrent.futures import as_completed
+from os import PathLike
+from typing import Any
+
+from dynamiq import Workflow
+from dynamiq.connections import BaseConnection
+from dynamiq.connections.managers import ConnectionManager
+from dynamiq.executors.context import ContextAwareThreadPoolExecutor
+from dynamiq.flows import Flow
+from dynamiq.nodes import Node
+from dynamiq.nodes.managers import NodeManager
+from dynamiq.nodes.node import ConnectionNode, NodeDependency
+from dynamiq.prompts import Prompt
+from dynamiq.serializers.types import RequirementData, WorkflowYamlData
+from dynamiq.utils import generate_uuid
+from dynamiq.utils.jsonpath import filter_all as jsonpath_filter_all
+from dynamiq.utils.logger import logger
+
+
+class WorkflowYAMLLoaderException(Exception):
+    """Exception raised for errors in the WorkflowYAMLDumper."""
+
+    pass
+
+
+class WorkflowYAMLLoader:
+    """Loader class for parsing YAML files and creating workflow components."""
+
+    @classmethod
+    def get_requirements(cls, data: dict) -> list[RequirementData]:
+        """
+        Recursively scan YAML data and extract all requirement dicts.
+
+        A requirement dict is identified by having both $type and $id fields.
+        This method does NOT initialize any components.
+
+        Args:
+            data: Dictionary containing workflow YAML data.
+
+        Returns:
+            List of RequirementData for all requirement dicts.
+        """
+        requirements: list[RequirementData] = []
+        cls._get_requirements_from_dict(data, requirements)
+        return requirements
+
+    @classmethod
+    def _get_requirements_from_dict(cls, data: dict, requirements: list[RequirementData]) -> None:
+        """Recursively extract RequirementData from dicts with both $type and $id."""
+        if requirement := RequirementData.from_dict(data):
+            requirements.append(requirement)
+            # Don't recurse into requirement dicts - they will be replaced entirely
+            return
+
+        for key, value in data.items():
+            # Skip fields that use 'type'/'object' keywords for different purposes (JSON Schema, prompts)
+            if key in ("prompt", "schema", "response_format"):
+                continue
+
+            if isinstance(value, dict):
+                cls._get_requirements_from_dict(value, requirements)
+            elif isinstance(value, list):
+                cls._get_requirements_from_list(value, requirements)
+
+    @classmethod
+    def _get_requirements_from_list(cls, items: list, requirements: list[RequirementData]) -> None:
+        """Recursively extract RequirementData from a list."""
+        for item in items:
+            if isinstance(item, dict):
+                cls._get_requirements_from_dict(item, requirements)
+            elif isinstance(item, list):
+                cls._get_requirements_from_list(item, requirements)
+
+    @staticmethod
+    def is_node_type(type_value: str | None) -> bool:
+        """
+        Check if the type value represents a node type (dotted path like 'module.ClassName').
+
+        Node types use dotted path format (e.g., 'dynamiq.nodes.agents.Agent'),
+        while other types (e.g., JSON schema types like 'string', 'object') don't contain dots.
+
+        Args:
+            type_value: The type string to check.
+
+        Returns:
+            True if the type value is a node type (contains a dot), False otherwise.
+        """
+        return bool(type_value and "." in type_value)
+
+    @classmethod
+    def apply_resolved_requirements(
+        cls,
+        data: dict,
+        resolved_requirements: dict[str, Any],
+    ) -> None:
+        """
+        Apply resolved requirement data to YAML dict in-place before initialization.
+
+        Replaces requirement dicts (identified by both $type and $id) with the corresponding
+        resolved data. The resolved value can be any type (dict, list, string, etc.).
+
+        Args:
+            data: Raw YAML data dictionary (will be mutated).
+            resolved_requirements: Dict mapping $id to resolved data (any type).
+
+        Raises:
+            WorkflowYAMLLoaderException: If a $id cannot be resolved.
+        """
+        cls._apply_requirements_to_dict(data, resolved_requirements)
+
+    @staticmethod
+    def _apply_value_path(resolved_value: Any, value_path: str, requirement_id: str) -> Any:
+        """Apply JSONPath expression to resolved requirement value to extract a single field.
+
+        Args:
+            resolved_value: The full resolved value from the external API.
+            value_path: JSONPath expression (e.g., "$.account_id").
+            requirement_id: Requirement $id for error messages.
+
+        Returns:
+            Single extracted value after applying the JSONPath.
+
+        Raises:
+            WorkflowYAMLLoaderException: If value_path is an invalid JSONPath expression,
+                doesn't match, matches multiple values, or resolved_value is not a dict/list.
+        """
+        if not isinstance(resolved_value, (dict, list)):
+            raise WorkflowYAMLLoaderException(
+                f"Cannot apply value_path '{value_path}' to requirement '{requirement_id}': "
+                f"resolved value must be a dict or list, got {type(resolved_value).__name__}"
+            )
+
+        try:
+            matches = jsonpath_filter_all(resolved_value, value_path)
+        except ValueError:
+            raise WorkflowYAMLLoaderException(f"Invalid value_path '{value_path}' for requirement '{requirement_id}'")
+
+        if len(matches) == 0:
+            raise WorkflowYAMLLoaderException(
+                f"value_path '{value_path}' did not match any value in resolved requirement '{requirement_id}'"
+            )
+        if len(matches) > 1:
+            raise WorkflowYAMLLoaderException(
+                f"value_path '{value_path}' matched multiple values in resolved requirement '{requirement_id}'. "
+                f"Expected a single value, got {len(matches)} matches."
+            )
+        return matches[0]
+
+    @classmethod
+    def _resolve_requirement_value(
+        cls,
+        requirement: RequirementData,
+        resolved_requirements: dict[str, Any],
+    ) -> Any:
+        """Look up and optionally apply value_path to a resolved requirement.
+
+        Args:
+            requirement: Parsed requirement with id and optional value_path.
+            resolved_requirements: Mapping of $id to resolved data.
+
+        Returns:
+            Final resolved value (with value_path applied if specified).
+
+        Raises:
+            WorkflowYAMLLoaderException: If $id is missing or value_path extraction fails.
+        """
+        if requirement.id not in resolved_requirements:
+            raise WorkflowYAMLLoaderException(
+                f"Cannot resolve $id '{requirement.id}': not found in resolved_requirements. "
+                f"Use get_requirements() to get requirements and resolve them before parsing."
+            )
+
+        resolved_value = resolved_requirements[requirement.id]
+
+        if requirement.value_path:
+            resolved_value = cls._apply_value_path(resolved_value, requirement.value_path, requirement.id)
+
+        return resolved_value
+
+    @classmethod
+    def _apply_requirements_to_dict(
+        cls,
+        data: dict,
+        resolved_requirements: dict[str, Any],
+    ) -> None:
+        """Recursively apply requirements to a dictionary and its nested structures.
+
+        When a requirement dict is found (has both $type and $id), it is completely
+        replaced with the resolved data at the parent level. If the requirement
+        specifies a value_path, the JSONPath is applied to extract a specific value.
+        """
+        for key, value in list(data.items()):
+            # Skip fields that use 'type'/'object' keywords for different purposes (JSON Schema, prompts)
+            if key in ("prompt", "schema", "response_format"):
+                continue
+
+            if isinstance(value, dict):
+                if requirement := RequirementData.from_dict(value):
+                    data[key] = cls._resolve_requirement_value(requirement, resolved_requirements)
+                else:
+                    cls._apply_requirements_to_dict(value, resolved_requirements)
+            elif isinstance(value, list):
+                cls._apply_requirements_to_list(value, resolved_requirements)
+
+    @classmethod
+    def _apply_requirements_to_list(
+        cls,
+        items: list,
+        resolved_requirements: dict[str, Any],
+    ) -> None:
+        """Recursively apply requirements within a list."""
+        for i, item in enumerate(items):
+            if isinstance(item, dict):
+                if requirement := RequirementData.from_dict(item):
+                    items[i] = cls._resolve_requirement_value(requirement, resolved_requirements)
+                else:
+                    cls._apply_requirements_to_dict(item, resolved_requirements)
+            elif isinstance(item, list):
+                cls._apply_requirements_to_list(item, resolved_requirements)
+
+    @classmethod
+    def get_entity_by_type(cls, entity_type: str, entity_registry: dict[str, Any] | None = None) -> Any:
+        """
+        Try to get entity by type and update mutable shared registry.
+
+        Args:
+            entity_type (str): The type of entity to retrieve.
+            entity_registry (dict[str, Any] | None): A registry of entities.
+
+        Returns:
+            Any: The retrieved entity.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the entity is not valid or cannot be found.
+        """
+        if entity_registry is None:
+            entity_registry = {}
+
+        if entity := entity_registry.get(entity_type):
+            return entity
+
+        try:
+            entity = ConnectionManager.get_connection_by_type(entity_type)
+        except ValueError:
+            pass
+
+        if not entity:
+            try:
+                entity = NodeManager.get_node_by_type(entity_type)
+            except ValueError:
+                pass
+
+        if not entity:
+            raise WorkflowYAMLLoaderException(f"Entity '{entity_type}' is not valid.")
+
+        entity_registry[entity_type] = entity
+        return entity
+
+    @classmethod
+    def get_connections(
+        cls,
+        data: dict[str, dict],
+        registry: dict[str, Any],
+    ) -> dict[str, BaseConnection]:
+        """
+        Get connections from the provided data.
+
+        Args:
+            data: The data containing connection information.
+            registry: A registry of entities.
+
+        Returns:
+            A dictionary of connections.
+
+        Raises:
+            WorkflowYAMLLoaderException: If there's an error in connection data or initialization.
+        """
+        connections = {}
+
+        for conn_id, conn_data in data.get("connections", {}).items():
+            if conn_id in connections:
+                raise WorkflowYAMLLoaderException(f"Connection '{conn_id}' already exists")
+            if not (conn_type := conn_data.get("type")):
+                raise WorkflowYAMLLoaderException(f"Value 'type' not found for connection '{conn_id}'")
+
+            conn_cls = cls.get_entity_by_type(entity_type=conn_type, entity_registry=registry)
+            conn_init_data = conn_data | {"id": conn_id}
+            conn_init_data.pop("type", None)
+            try:
+                connection = conn_cls(**conn_init_data)
+            except Exception as e:
+                raise WorkflowYAMLLoaderException(f"Connection '{conn_id}' data is invalid. Error: {str(e) or repr(e)}")
+
+            connections[conn_id] = connection
+
+        return connections
+
+    @classmethod
+    def get_inline_connection(
+        cls,
+        node_id: str,
+        conn_data: dict,
+        registry: dict[str, Any] | None = None,
+    ) -> BaseConnection:
+        """
+        Create an inline connection from node's connection data.
+
+        Args:
+            node_id: The ID of the node that uses this connection.
+            conn_data: The connection data dictionary.
+            registry: A registry of entities.
+
+        Returns:
+            The created connection.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the connection data is invalid.
+        """
+        if not (conn_type := conn_data.get("type")):
+            raise WorkflowYAMLLoaderException(f"Value 'type' not found for inline connection in node '{node_id}'")
+
+        conn_cls = cls.get_entity_by_type(entity_type=conn_type, entity_registry=registry)
+        conn_init_data = conn_data.copy()
+        conn_init_data.pop("type", None)
+
+        # Generate UUID for connection id if not provided
+        if "id" not in conn_init_data:
+            conn_init_data["id"] = generate_uuid()
+
+        try:
+            connection = conn_cls(**conn_init_data)
+        except Exception as e:
+            raise WorkflowYAMLLoaderException(
+                f"Inline connection for node '{node_id}' data is invalid. Error: {str(e) or repr(e)}"
+            )
+
+        return connection
+
+    @classmethod
+    def init_prompt(cls, prompt_init_data: dict) -> Prompt:
+        """
+        Initialize a prompt from the provided data.
+
+        Args:
+            prompt_init_data (dict): The data for the prompt.
+
+        Returns:
+            Prompt: The initialized prompt.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the specified prompt is not found.
+        """
+        try:
+            return Prompt(**prompt_init_data)
+        except Exception as e:
+            raise WorkflowYAMLLoaderException(
+                f"Prompt '{prompt_init_data.get('id')}' data is invalid. Error: {str(e) or repr(e)}"
+            )
+
+    @classmethod
+    def get_prompts(cls, data: dict[str, dict]) -> dict[str, Prompt]:
+        """
+        Get prompts from the provided data.
+
+        Args:
+            data (dict[str, dict]): The data containing prompt information.
+
+        Returns:
+            dict[str, Prompt]: A dictionary of prompts.
+
+        Raises:
+            WorkflowYAMLLoaderException: If there's an error in prompt data or initialization.
+        """
+        prompts = {}
+        for prompt_id, prompt_data in data.get("prompts", {}).items():
+            if prompt_id in prompts:
+                raise WorkflowYAMLLoaderException(f"Prompt '{prompt_id}' already exists")
+            prompts[prompt_id] = cls.init_prompt(prompt_data | {"id": prompt_id})
+
+        return prompts
+
+    @classmethod
+    def get_node_prompt(cls, node_id: str, node_data: dict, prompts: dict[id, Prompt]) -> Prompt | None:
+        """
+        Get the prompt for a node.
+
+        Args:
+            node_id (str): The ID of the node.
+            node_data (dict): The data for the node.
+            prompts (dict[id, Prompt]): A dictionary of available prompts.
+
+        Returns:
+            Prompt | None: The prompt for the node, or None if not found.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the specified prompt is not found.
+        """
+        prompt = None
+        if prompt_id := node_data.get("prompt"):
+            prompt = prompts.get(prompt_id)
+            if not prompt:
+                raise WorkflowYAMLLoaderException(f"Prompt '{prompt_id}' for node '{node_id}' not found")
+        return prompt
+
+    @classmethod
+    def get_node_connection(
+        cls,
+        node_id: str,
+        node_data: dict,
+        connections: dict[str, BaseConnection],
+        registry: dict[str, Any] | None = None,
+    ) -> BaseConnection | None:
+        """
+        Get the connection for a node.
+
+        Supports both:
+        - Reference by ID (string): Looks up connection in the connections dictionary.
+        - Inline connection (dict): Creates a new connection from the provided data.
+
+        Args:
+            node_id: The ID of the node.
+            node_data: The data for the node.
+            connections: A dictionary of available connections.
+            registry: A registry of entities (required for inline connections).
+
+        Returns:
+            The connection for the node, or None if not found.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the specified connection is not found or invalid.
+        """
+        conn_value = node_data.get("connection")
+        if conn_value is None:
+            return
+
+        if isinstance(conn_value, str):
+            conn = connections.get(conn_value)
+            if not conn:
+                raise WorkflowYAMLLoaderException(f"Connection '{conn_value}' for node '{node_id}' not found")
+            return conn
+
+        if isinstance(conn_value, dict):
+            connection = cls.get_inline_connection(
+                node_id=node_id,
+                conn_data=conn_value,
+                registry=registry,
+            )
+            connections[connection.id] = connection
+            return connection
+
+        raise WorkflowYAMLLoaderException(
+            f"Invalid connection format for node '{node_id}'. Expected string (reference) or dict (inline)."
+        )
+
+    @classmethod
+    def get_node_vector_store_connection(
+        cls,
+        node_id: str,
+        node_data: dict,
+        connections: dict[str, BaseConnection],
+        registry: dict[str, Any] | None = None,
+    ) -> Any | None:
+        """
+        Get the vector store connection for a node.
+
+        Args:
+            node_id: The ID of the node.
+            node_data: The data for the node.
+            connections: A dictionary of available connections.
+            registry: A registry of entities (required for inline connections).
+
+        Returns:
+            The vector store connection for the node, or None if not found.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the specified vector store connection is not found or
+                                         does not support vector store initialization.
+        """
+        conn = cls.get_node_connection(
+            node_id=node_id,
+            node_data=node_data,
+            connections=connections,
+            registry=registry,
+        )
+        if conn:
+            if not (conn_to_vs := getattr(conn, "connect_to_vector_store", None)) or not callable(conn_to_vs):
+                raise WorkflowYAMLLoaderException(
+                    f"Vector store connection '{conn.id}' for node '{node_id}' not support vector store initialization"
+                )
+        return conn
+
+    @classmethod
+    def get_node_flow(cls, node_id: str, node_data: dict, flows: dict[id, Flow]) -> Flow | None:
+        """
+        Get the flow for a node.
+
+        Args:
+            node_id (str): The ID of the node.
+            node_data (dict): The data for the node.
+            flows (dict[id, Flow]): A dictionary of available flows.
+
+        Returns:
+            Flow | None: The flow for the node, or None if not found.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the specified flow is not found.
+        """
+        flow = None
+        if flow_id := node_data.get("flow"):
+            flow = flows.get(flow_id)
+            if not flow:
+                raise WorkflowYAMLLoaderException(f"Flow '{flow_id}' for node '{node_id}' not found")
+        return flow
+
+    @classmethod
+    def get_node_flows(cls, node_id: str, node_data: dict, flows: dict[id, Flow]) -> list[Flow]:
+        """
+        Get the flows for a node.
+
+        Args:
+            node_id (str): The ID of the node.
+            node_data (dict): The data for the node.
+            flows (dict[id, Flow]): A dictionary of available flows.
+
+        Returns:
+            list[Flow]: A list of flows for the node.
+
+        Raises:
+            WorkflowYAMLLoaderException: If any specified flow is not found.
+        """
+        node_flows = []
+        for flow_id in node_data.get("flows", []):
+            node_flow = flows.get(flow_id)
+            if not node_flow:
+                raise WorkflowYAMLLoaderException(f"Flow '{flow_id}' for node '{node_id}' not found")
+            node_flows.append(node_flow)
+        return node_flows
+
+    @classmethod
+    def get_node_dependencies(cls, node_id: str, node_data: dict, nodes: dict[str, Node]):
+        """
+        Get the dependencies for a node.
+
+        Args:
+            node_id (str): The ID of the node.
+            node_data (dict): The data for the node.
+            nodes (dict[str, Node]): A dictionary of available nodes.
+
+        Returns:
+            list[NodeDependency]: A list of node dependencies.
+
+        Raises:
+            WorkflowYAMLLoaderException: If there's an error in dependency data or initialization.
+        """
+        node_depends = []
+        for dependency_data in node_data.get("depends", []):
+            dependency_node = nodes.get(dependency_data.get("node"))
+            dependency_init_data = dependency_data | {"node": dependency_node}
+            try:
+                dependency = NodeDependency(**dependency_init_data)
+            except Exception as e:
+                raise WorkflowYAMLLoaderException(
+                    f"Dependency '{dependency_data.get('node')}' data for node '{node_id}' "
+                    f"is invalid. Error: {str(e) or repr(e)}"
+                )
+
+            if dependency.option:
+                if not (dep_options := getattr(dependency_node, "options", [])):
+                    raise WorkflowYAMLLoaderException(
+                        f"Dependency '{dependency.node.id}' with option '{dependency.option}' "
+                        f"for node '{node_id}' not found"
+                    )
+
+                if not any(opt.id == dependency.option for opt in dep_options):
+                    raise WorkflowYAMLLoaderException(
+                        f"Dependency '{dependency.node.id}' with option '{dependency.option}' "
+                        f"for node '{node_id}' not found"
+                    )
+
+            node_depends.append(dependency)
+        return node_depends
+
+    @classmethod
+    def get_updated_node_init_data_with_initialized_nodes(
+        cls,
+        node_init_data: dict,
+        nodes: dict[str, Node],
+        flows: dict[str, Flow],
+        connections: dict[str, BaseConnection],
+        prompts: dict[str, Prompt],
+        registry: dict[str, Any],
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ):
+        """
+        Get node init data with initialized nodes components recursively (llms, agents, etc)
+
+        Args:
+            node_init_data: Dictionary containing node data.
+            nodes: Existing nodes dictionary.
+            flows: Existing flows dictionary.
+            connections: Existing connections dictionary.
+            prompts: Existing prompts dictionary.
+            registry: Registry of node types.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            A dictionary of newly created nodes with dependencies.
+        """
+        updated_node_init_data = {}
+        kwargs = dict(
+            nodes=nodes,
+            flows=flows,
+            connections=connections,
+            prompts=prompts,
+            registry=registry,
+            connection_manager=connection_manager,
+            init_components=init_components,
+            max_workers=max_workers,
+        )
+        for param_name, param_data in node_init_data.items():
+            # TODO: dummy fix, revisit this!
+            # We had to add this condition because some nodes have a `schema`/`response_format` params,
+            # that have a `type` field that contains types supported by JSON schema (e.g., string, object).
+            if param_name in ("schema", "response_format", "agent_factory"):
+                updated_node_init_data[param_name] = param_data
+
+            elif isinstance(param_data, dict):
+                updated_param_data = {}
+                for param_name_inner, param_data_inner in param_data.items():
+                    if param_name_inner in ("prompt", "schema", "response_format", "agent_factory", "connection"):
+                        updated_param_data[param_name_inner] = param_data_inner
+                    elif isinstance(param_data_inner, (dict, list)):
+                        param_id = None
+                        updated_param_data[param_name_inner] = cls.get_updated_node_init_data_with_initialized_nodes(
+                            {param_id: param_data_inner}, **kwargs
+                        )[param_id]
+                    else:
+                        updated_param_data[param_name_inner] = param_data_inner
+
+                if cls.is_node_type(updated_param_data.get("type")):
+                    param_id = updated_param_data.get("id")
+                    updated_param_data = cls.get_nodes_without_depends({param_id: updated_param_data}, **kwargs)[
+                        param_id
+                    ]
+
+                updated_node_init_data[param_name] = updated_param_data
+
+            elif isinstance(param_data, list):
+                updated_items = []
+                for item in param_data:
+                    if isinstance(item, (dict, list)):
+                        param_id = None
+                        updated_items.append(
+                            cls.get_updated_node_init_data_with_initialized_nodes(
+                                node_init_data={param_id: item}, **kwargs
+                            )[param_id]
+                        )
+                    else:
+                        updated_items.append(item)
+                updated_node_init_data[param_name] = updated_items
+
+            else:
+                updated_node_init_data[param_name] = param_data
+
+        return updated_node_init_data
+
+    @classmethod
+    def get_nodes_without_depends(
+        cls,
+        data: dict,
+        nodes: dict[str, Node],
+        flows: dict[str, Flow],
+        connections: dict[str, BaseConnection],
+        prompts: dict[str, Prompt],
+        registry: dict[str, Any],
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ) -> dict[str, Node]:
+        """
+        Create nodes without dependencies from the given data.
+        Automatically uses parallel processing for multiple nodes (>1).
+
+        Args:
+            data: Dictionary containing node data.
+            nodes: Existing nodes dictionary.
+            flows: Existing flows dictionary.
+            connections: Existing connections dictionary.
+            prompts: Existing prompts dictionary.
+            registry: Registry of node types.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            A dictionary of newly created nodes without dependencies.
+
+        Raises:
+            WorkflowYAMLLoaderException: If node data is invalid or duplicates are found.
+        """
+        new_nodes = {}
+        get_node_kwargs = dict(
+            nodes=nodes,
+            flows=flows,
+            connections=connections,
+            prompts=prompts,
+            registry=registry,
+            connection_manager=connection_manager,
+            init_components=init_components,
+        )
+
+        nodes_to_create = {}
+        for node_id, node_data in data.items():
+            if node_id in nodes:
+                continue
+            if node_id in new_nodes:
+                raise WorkflowYAMLLoaderException(f"Node '{node_id}' already exists")
+            nodes_to_create[node_id] = node_data
+
+        if len(nodes_to_create) <= 1:
+            for node_id, node_data in nodes_to_create.items():
+                try:
+                    node_id, node = cls.get_node_without_depends(
+                        node_id=node_id,
+                        node_data=node_data,
+                        **get_node_kwargs,
+                    )
+                    new_nodes[node_id] = node
+                except WorkflowYAMLLoaderException:
+                    raise
+
+            return new_nodes
+
+        with ContextAwareThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_node_id = {
+                executor.submit(
+                    cls.get_node_without_depends,
+                    node_id=node_id,
+                    node_data=node_data,
+                    **get_node_kwargs,
+                ): node_id
+                for node_id, node_data in nodes_to_create.items()
+            }
+
+            for future in as_completed(future_to_node_id):
+                node_id = future_to_node_id[future]
+                try:
+                    result_node_id, node = future.result()
+                    new_nodes[result_node_id] = node
+                except WorkflowYAMLLoaderException:
+                    raise
+                except Exception as e:
+                    raise WorkflowYAMLLoaderException(f"Node '{node_id}' processing failed. Error: {str(e) or repr(e)}")
+
+        return new_nodes
+
+    @classmethod
+    def get_node_without_depends(
+        cls,
+        node_id: str,
+        node_data: dict,
+        nodes: dict[str, Node],
+        flows: dict[str, Flow],
+        connections: dict[str, BaseConnection],
+        prompts: dict[str, Prompt],
+        registry: dict[str, Any],
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+    ) -> tuple[str, Node]:
+        """
+        Create a single node without dependencies from the given data.
+
+        Args:
+            node_id: Node identifier.
+            node_data: Dictionary containing node data.
+            nodes: Existing nodes dictionary.
+            flows: Existing flows dictionary.
+            connections: Existing connections dictionary.
+            prompts: Existing prompts dictionary.
+            registry: Registry of node types.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+
+        Returns:
+            A tuple of (node_id, node).
+
+        Raises:
+            WorkflowYAMLLoaderException: If node data is invalid.
+        """
+        if not (node_type := node_data.get("type")):
+            raise WorkflowYAMLLoaderException(f"Value 'type' for node '{node_id}' not found")
+
+        node_cls = cls.get_entity_by_type(entity_type=node_type, entity_registry=registry)
+
+        # Init node params
+        node_init_data = node_data.copy()
+        if node_id:
+            node_init_data["id"] = node_id
+        node_init_data.pop("type", None)
+        node_init_data.pop("depends", None)
+
+        if "is_postponed_component_init" not in node_init_data:
+            node_init_data["is_postponed_component_init"] = True
+
+        if "connection" in node_init_data:
+            get_node_conn = (
+                cls.get_node_vector_store_connection
+                if isinstance(node_cls, ConnectionNode)
+                else cls.get_node_connection
+            )
+            node_init_data["connection"] = get_node_conn(
+                node_id=node_id,
+                node_data=node_data,
+                connections=connections,
+                registry=registry,
+            )
+        if prompt_data := node_init_data.get("prompt"):
+            node_init_data["prompt"] = (
+                cls.get_node_prompt(node_id=node_id, node_data=node_data, prompts=prompts)
+                if isinstance(prompt_data, str)
+                else cls.init_prompt(prompt_data)
+            )
+        if "flow" in node_init_data:
+            node_init_data["flow"] = cls.get_node_flow(node_id=node_id, node_data=node_data, flows=flows)
+        if "flows" in node_init_data:
+            node_init_data["flows"] = cls.get_node_flows(node_id=node_id, node_data=node_data, flows=flows)
+
+        try:
+            node_init_data = cls.get_updated_node_init_data_with_initialized_nodes(
+                node_init_data=node_init_data,
+                nodes=nodes,
+                flows=flows,
+                connections=connections,
+                prompts=prompts,
+                registry=registry,
+                connection_manager=connection_manager,
+                init_components=init_components,
+            )
+
+            node = node_cls(**node_init_data)
+
+            if init_components and getattr(node, "init_components", False):
+                node.init_components(connection_manager=connection_manager)
+                node.is_postponed_component_init = False
+
+        except Exception as e:
+            logger.exception(f"Node '{node_id}' data is invalid")
+            raise WorkflowYAMLLoaderException(f"Node '{node_id}' data is invalid. Error: {str(e) or repr(e)}")
+
+        return node_id, node
+
+    @classmethod
+    def get_nodes(
+        cls,
+        nodes_data: dict,
+        nodes: dict[str, Node],
+        flows: dict[str, Flow],
+        connections: dict[str, BaseConnection],
+        prompts: dict[str, Prompt],
+        registry: dict[str, Any],
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ):
+        """
+        Create nodes with dependencies from the given data.
+
+        Args:
+            nodes_data: Dictionary containing node data.
+            nodes: Existing nodes dictionary.
+            flows: Existing flows dictionary.
+            connections: Existing connections dictionary.
+            prompts: Existing prompts dictionary.
+            registry: Registry of node types.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            A dictionary of newly created nodes with dependencies.
+        """
+
+        new_nodes = cls.get_nodes_without_depends(
+            data=nodes_data,
+            nodes=nodes,
+            flows=flows,
+            connections=connections,
+            prompts=prompts,
+            registry=registry,
+            connection_manager=connection_manager,
+            init_components=init_components,
+            max_workers=max_workers,
+        )
+
+        all_nodes = nodes | new_nodes
+        for node_id, node in new_nodes.items():
+            node.depends = cls.get_node_dependencies(node_id=node_id, node_data=nodes_data[node_id], nodes=all_nodes)
+
+        return new_nodes
+
+    @classmethod
+    def get_dependant_nodes(
+        cls,
+        nodes_data: dict[str, dict],
+        flows_data: dict[str, dict],
+        connections: dict[str, BaseConnection],
+        prompts: dict[str, Prompt],
+        registry: dict[str, Any],
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ) -> dict[str, Node]:
+        """
+        Get nodes that are dependent on flows.
+
+        Args:
+            nodes_data: Dictionary containing node data.
+            flows_data: Dictionary containing flow data.
+            connections: Existing connections dictionary.
+            prompts: Existing prompts dictionary.
+            registry: Registry of node types.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            A dictionary of nodes that are dependent on flows.
+        """
+        dependant_nodes, dependant_nodes_data = {}, {}
+        dependant_flow_ids = []
+
+        for node_id, node_data in nodes_data.items():
+            if "flow" in node_data:
+                dependant_nodes_data[node_id] = node_data
+                dependant_flow_ids.append(node_data["flow"])
+            if "flows" in node_data:
+                dependant_nodes_data[node_id] = node_data
+                dependant_flow_ids.extend(node_data["flows"])
+
+        # Get nodes from dependant flows
+        if dependant_flow_ids:
+            dependant_flows_nodes_ids = []
+            for flow_id, flow_data in flows_data.items():
+                if flow_id in dependant_flow_ids:
+                    dependant_flows_nodes_ids.extend(flow_data.get("nodes", []))
+
+            dependant_flows_nodes_data = {
+                node_id: node_data for node_id, node_data in nodes_data.items() if node_id in dependant_flows_nodes_ids
+            }
+
+            dependant_nodes = cls.get_nodes(
+                nodes_data=dependant_flows_nodes_data,
+                nodes={},
+                flows={},
+                connections=connections,
+                prompts=prompts,
+                registry=registry,
+                connection_manager=connection_manager,
+                init_components=init_components,
+                max_workers=max_workers,
+            )
+
+        return dependant_nodes
+
+    @classmethod
+    def get_flows(
+        cls,
+        data: dict,
+        flows: dict[str, Flow],
+        nodes: dict[str, Node],
+        connection_manager: ConnectionManager | None = None,
+    ) -> dict[str, Flow]:
+        """
+        Create flows from the given data.
+
+        Args:
+            data: Dictionary containing flow data.
+            flows: Existing flows dictionary.
+            nodes: Existing nodes dictionary.
+            connection_manager: Optional connection manager.
+
+        Returns:
+            A dictionary of newly created flows.
+
+        Raises:
+            WorkflowYAMLLoaderException: If flow data is invalid or duplicates are found.
+        """
+        new_flows = {}
+        for flow_id, flow_data in data.items():
+            if flow_id in flows:
+                continue
+
+            if flow_id in new_flows:
+                raise WorkflowYAMLLoaderException(f"Flow '{flow_id}' already exists")
+
+            flow_node_ids = flow_data.get("nodes", [])
+            flow_node_ids = set(flow_node_ids)
+            dep_node_ids = set()
+            for node_id in flow_node_ids:
+                if node_id not in nodes:
+                    raise WorkflowYAMLLoaderException(f"Node '{node_id}' for flow '{flow_id}' not found")
+
+                dep_node_ids.update({dep.node.id for dep in nodes[node_id].depends})
+
+            for node_id in dep_node_ids:
+                if node_id not in flow_node_ids:
+                    raise WorkflowYAMLLoaderException(
+                        f"Dependency node '{node_id}' in the flow '{flow_id}' node list not found"
+                    )
+
+            flow_init_data = flow_data | {
+                "id": flow_id,
+                "nodes": [nodes[node_id] for node_id in flow_node_ids],
+            }
+            if connection_manager:
+                flow_init_data["connection_manager"] = connection_manager
+
+            checkpoint_data = flow_init_data.get("checkpoint")
+            if isinstance(checkpoint_data, dict):
+                backend_data = checkpoint_data.get("backend")
+                if isinstance(backend_data, dict) and "type" in backend_data:
+                    backend_data = backend_data.copy()
+                    backend_cls = cls.get_entity_by_type(backend_data.pop("type"))
+                    checkpoint_data["backend"] = backend_cls(**backend_data)
+
+            try:
+                flow = Flow(**flow_init_data)
+            except Exception as e:
+                raise WorkflowYAMLLoaderException(f"Flow '{flow_id}' data is invalid. Error: {str(e) or repr(e)}")
+
+            new_flows[flow_id] = flow
+        return new_flows
+
+    @classmethod
+    def get_dependant_flows(
+        cls,
+        nodes_data: dict[str, dict],
+        flows_data: dict[str, dict],
+        dependant_nodes: dict[str, Node],
+        connection_manager: ConnectionManager | None = None,
+    ) -> dict[str, Flow]:
+        """
+        Get flows that are dependent on nodes.
+
+        Args:
+            nodes_data: Dictionary containing node data.
+            flows_data: Dictionary containing flow data.
+            dependant_nodes: Dictionary of dependent nodes.
+            connection_manager: Optional connection manager.
+
+        Returns:
+            A dictionary of flows that are dependent on nodes.
+        """
+        dependant_flows = {}
+        dependant_flow_ids = []
+
+        for node_id, node_data in nodes_data.items():
+            if "flow" in node_data:
+                dependant_flow_ids.append(node_data["flow"])
+            if "flows" in node_data:
+                dependant_flow_ids.extend(node_data["flows"])
+
+        if dependant_flow_ids:
+            dependant_flows_data = {
+                flow_id: flow_data for flow_id, flow_data in flows_data.items() if flow_id in dependant_flow_ids
+            }
+            dependant_flows = cls.get_flows(
+                data=dependant_flows_data,
+                flows={},
+                nodes=dependant_nodes,
+                connection_manager=connection_manager,
+            )
+
+        return dependant_flows
+
+    @classmethod
+    def get_workflows(cls, data: dict, flows: dict[str, Flow]) -> dict[str, Workflow]:
+        """
+        Create workflows from the given data.
+
+        Args:
+            data: Dictionary containing workflow data.
+            flows: Existing flows dictionary.
+
+        Returns:
+            A dictionary of newly created workflows.
+
+        Raises:
+            WorkflowYAMLLoaderException: If workflow data is invalid.
+        """
+        workflows = {}
+        for wf_id, wf_data in data.get("workflows", {}).items():
+            if not (flow_id := wf_data.get("flow")):
+                raise WorkflowYAMLLoaderException(f"Value 'flow' for dynamiq '{wf_id}' not found ")
+            if not (flow := flows.get(flow_id)):
+                raise WorkflowYAMLLoaderException(f"Flow '{flow_id}' for dynamiq '{wf_id}' not found")
+            if version := wf_data.get("version"):
+                version = str(version)
+
+            try:
+                wf = Workflow(id=wf_id, flow=flow, version=version)
+            except Exception as e:
+                raise WorkflowYAMLLoaderException(f"Workflow '{wf_id}' data is invalid. Error: {str(e) or repr(e)}")
+
+            workflows[wf_id] = wf
+        return workflows
+
+    @classmethod
+    def load(
+        cls,
+        file_path: str | PathLike,
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ) -> WorkflowYamlData:
+        """
+        Load data from a YAML file and parse it.
+
+        Args:
+            file_path: Path to the YAML file.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            Parsed WorkflowYamlData object.
+        """
+        data = cls.loads(file_path)
+        return cls.parse(
+            data=data,
+            connection_manager=connection_manager,
+            init_components=init_components,
+            max_workers=max_workers,
+        )
+
+    @classmethod
+    def loads(cls, file_path: str | PathLike):
+        """
+        Load data from a YAML file.
+
+        Args:
+            file_path: Path to the YAML file.
+
+        Returns:
+            Parsed data from the YAML file.
+
+        Raises:
+            WorkflowYAMLLoaderException: If the file is not found.
+        """
+        from omegaconf import OmegaConf
+
+        try:
+            conf = OmegaConf.load(file_path)
+            logger.debug(f"Loaded config from '{file_path}'")
+
+            data = OmegaConf.to_container(conf, resolve=True)
+        except FileNotFoundError:
+            raise WorkflowYAMLLoaderException(f"File '{file_path}' not found")
+
+        return data
+
+    @classmethod
+    def parse(
+        cls,
+        data: dict,
+        connection_manager: ConnectionManager | None = None,
+        init_components: bool = False,
+        max_workers: int | None = None,
+    ) -> WorkflowYamlData:
+        """
+        Parse dynamiq workflow data.
+
+        Args:
+            data: Dictionary containing workflow data.
+            connection_manager: Optional connection manager.
+            init_components: Flag to initialize components.
+            max_workers: Maximum number of worker threads for node parallel processing.
+
+        Returns:
+            Parsed WorkflowYamlData object.
+
+        Raises:
+            WorkflowYAMLLoaderException: If parsing fails.
+
+        Usage:
+            # Step 1: Extract all requirements without initialization
+            requirements = WorkflowYAMLLoader.get_requirements(data)
+
+            # Step 2: Resolve requirements via external API
+            resolved = {req.id: api_fetch(req.id) for req in requirements}
+
+            # Step 3: Apply resolved requirements to YAML data (mutates in-place)
+            WorkflowYAMLLoader.apply_resolved_requirements(data, resolved)
+
+            # Step 4: Parse the data
+            result = WorkflowYAMLLoader.parse(data)
+        """
+        nodes, flows = {}, {}
+        # Mutable shared registry that updates with each new entity.
+        node_registry, connection_registry = {}, {}
+
+        if init_components and connection_manager is None:
+            connection_manager = ConnectionManager()
+
+        try:
+            connections = cls.get_connections(
+                data=data,
+                registry=connection_registry,
+            )
+            prompts = cls.get_prompts(data)
+
+            nodes_data = data.get("nodes", {})
+            flows_data = data.get("flows", {})
+
+            dependant_nodes = cls.get_dependant_nodes(
+                nodes_data=nodes_data,
+                flows_data=flows_data,
+                connections=connections,
+                prompts=prompts,
+                registry=node_registry,
+                connection_manager=connection_manager,
+                init_components=init_components,
+                max_workers=max_workers,
+            )
+            nodes.update(dependant_nodes)
+
+            dependant_flows = cls.get_dependant_flows(
+                nodes_data=nodes_data,
+                flows_data=flows_data,
+                dependant_nodes=dependant_nodes,
+                connection_manager=connection_manager,
+            )
+            flows.update(dependant_flows)
+
+            non_dependant_nodes = cls.get_nodes(
+                nodes_data=nodes_data,
+                nodes=nodes,
+                flows=flows,
+                connections=connections,
+                prompts=prompts,
+                registry=node_registry,
+                connection_manager=connection_manager,
+                init_components=init_components,
+                max_workers=max_workers,
+            )
+            nodes.update(non_dependant_nodes)
+
+            non_dependant_flows = cls.get_flows(
+                data=flows_data,
+                flows=flows,
+                nodes=nodes,
+                connection_manager=connection_manager,
+            )
+            flows.update(non_dependant_flows)
+
+            workflows = cls.get_workflows(data, flows)
+        except WorkflowYAMLLoaderException:
+            raise
+        except Exception:
+            logger.exception("Failed to parse Yaml data with unexpected error")
+            raise
+
+        return WorkflowYamlData(
+            connections=connections,
+            nodes=nodes,
+            flows=flows,
+            workflows=workflows,
+        )

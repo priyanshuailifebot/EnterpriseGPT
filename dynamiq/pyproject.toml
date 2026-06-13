@@ -1,0 +1,144 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "dynamiq"
+version = "0.49.0"
+description = "Dynamiq is an orchestration framework for agentic AI and LLM applications"
+authors = ["Dynamiq Team <hello@getdynamiq.ai>"]
+license = "Apache License 2.0"
+readme = "README.md"
+keywords = ["ai", "gpt", "agents", "rag", "llm", "generative-ai", "llmops"]
+homepage = "https://www.getdynamiq.ai"
+repository = "https://github.com/dynamiq-ai/dynamiq"
+documentation = "https://dynamiq-ai.github.io/dynamiq"
+classifiers = [
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+jinja2 = "~3.1.6"
+pydantic = "~2.12.5"
+openai = ">=1.83.0"
+boto3 = "~1.34.34"
+redis = ">=5.0.0,<8.0.0"
+google-cloud-aiplatform = "~1.93.0"
+litellm = "^1.83.7"
+requests = "^2.32.5"
+RestrictedPython = "~8.0"
+jsonpath-ng = "~1.6.1"
+jsonpickle = "~3.0.3"
+pinecone-client = "~3.2.2"
+chromadb-client = "~0.5.5.dev0"
+unstructured-client = "^0.42.3"
+omegaconf = "~2.3.0"
+weaviate-client = "~4.20.4"
+filetype = "~1.2.0"
+more-itertools = "~10.3.0"
+pdf2image = "~1.17.0"
+e2b-code-interpreter = "~2.0.0"
+black = "~24.8.0"
+pypdf = "^6.10.2"
+python-pptx = "1.0.2"
+qdrant-client = "~1.11.3"
+pymilvus = "~2.5.6"
+psycopg = { version = "~3.2.3", extras = ["binary"] }
+pgvector = "~0.3.6"
+mysql-connector-python = "~9.1.0"
+snowflake-connector-python = "~3.13.2"
+rapidfuzz = "~3.11.0"
+sacrebleu = "~2.5.1"
+rouge-score = "~0.1.2"
+lxml = "^5.3.1"
+elasticsearch = "~8.12.0"
+numpy = "~1.26.0"
+mcp = "^1.23.0"
+datamodel-code-generator = "0.30.0"
+python-docx = "^1.1.2"
+databricks-sql-connector = "~4.0.3"
+orjson = "^3.11.6"
+charset-normalizer = "^3.4.2"
+tenacity = "9.1.2"
+regex = "^2025.9.18"
+requests-aws4auth = "^1.3.1"
+opensearch-py = "^3.0.0"
+openpyxl = "^3.1.5"
+pdfplumber = "^0.11.8"
+matplotlib = "^3.10.7"
+seaborn = "^0.13.2"
+pyyaml = "6.0.1"
+e2b = "2.8.0"
+tiktoken = "0.12.0"
+neo4j = "^6.0.3"
+e2b-desktop = "^2.2.0"
+beautifulsoup4 = "~4.12.3"
+markdown = "^3.8.1"
+inscriptis = "2.5.0"
+stagehand = "~0.4.0"
+pyOpenSSL = "~24.3.0"
+steel-sdk = "0.15.0"
+reportlab = "~4.3.0"
+cua-computer = { version = "0.4.19", python = ">=3.12,<3.14", optional = true }
+daytona = "^0.161.0"
+pydantic-monty = {version = "^0.0.16", optional = true}
+
+[tool.poetry.extras]
+cua = ["cua-computer"]
+monty = ["pydantic-monty"]
+
+[tool.poetry.group.dev.dependencies]
+setuptools = "~78.1.1"
+pre-commit = "~3.7.0"
+pytest = "^9.0.3"
+pytest-mock = "~3.14.0"
+pytest-asyncio = "^1.0.0"
+coverage = "~7.3.2"
+fakeredis = "~2.21.3"
+python-dotenv = "^1.2.2"
+mkdocs = "~1.6.0"
+mkdocs-material = "~9.5.27"
+mkdocstrings = "~0.25.1"
+mkdocstrings-python = "~1.10.4"
+mkdocs-autorefs = "<1.4.0"
+griffe = "<2.0.0"
+requests-mock = "~1.12.1"
+pytest-rerunfailures = "^16.1"
+
+[tool.poetry.group.examples]
+optional = true
+
+[tool.poetry.group.examples.dependencies]
+fastapi = "^0.116.1"
+uvicorn = "^0.35.0"
+websockets = "~15.0.0"
+sse-starlette = "~2.1.0"
+httpx = "~0.28.0"
+httpx-sse = "~0.4.0"
+chainlit = "^2.9.4"
+typer = "~0.12.3"
+streamlit = "^1.54.0"
+streamlit-date-picker = "~0.0.3"
+streamlit-image-select = "~0.6.0"
+streamlit-pdf-viewer = "~0.0.14"
+weasyprint = "^68.0"
+selenium = "~4.21.0"
+tqdm = "~4.66.4"
+sympy = "~1.13.1"
+pygraphviz = "~1.14"
+agentops = "~0.3.12"
+langfuse = "^2.51.2"
+peft = "^0.13.0"
+pyarrow = "~18.0.0"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.isort]
+line_length = 120
+
+[tool.poetry.scripts]
+dynamiq = "dynamiq.cli:main"

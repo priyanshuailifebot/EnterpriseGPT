@@ -1,0 +1,50 @@
+services:
+  dynamiq-app:
+    image: dynamiq-app:${IMAGE_TAG:-local}
+    build:
+      target: develop
+    volumes:
+      - ./:/app
+
+  dynamiq-app-test:
+    image: dynamiq-app:${IMAGE_TAG:-local}
+    build:
+      target: develop
+    entrypoint: ["make", "test"]
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+
+  dynamiq-app-test-cov:
+    image: dynamiq-app:${IMAGE_TAG:-local}
+    build:
+      target: develop
+    entrypoint: ["make", "test-cov"]
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - ./reports:/app/reports:wr
+
+
+  dynamiq-app-test-cov-exclude-integration-with-creds:
+    image: dynamiq-app:${IMAGE_TAG:-local}
+    build:
+      target: develop
+    entrypoint: ["make", "test-cov-exclude-integration-with-creds"]
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - ./reports:/app/reports:wr
+
+  dynamiq-app-test-integration-with-creds:
+    image: dynamiq-app:${IMAGE_TAG:-local}
+    build:
+      target: develop
+    entrypoint: ["make", "test-integration-with-creds"]
+    env_file:
+      - .env
+    volumes:
+      - ./:/app

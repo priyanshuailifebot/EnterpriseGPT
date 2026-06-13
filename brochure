@@ -1,0 +1,391 @@
+export default function AILifeBOTBrochure() {
+  const solutions = [
+    {
+      title: "Voice-First AI Agents",
+      points: [
+        "Autonomous enterprise workflows",
+        "Multilingual voice interactions",
+        "Human-like conversational intelligence",
+        "AI-powered decision support",
+      ],
+    },
+    {
+      title: "Conversational AI Platforms",
+      points: [
+        "WhatsApp AI Automation",
+        "Voice BOTs & IVR",
+        "Omnichannel customer engagement",
+        "Enterprise integrations",
+      ],
+    },
+    {
+      title: "Agentic AI Automation",
+      points: [
+        "IT helpdesk automation",
+        "HR & recruitment automation",
+        "Supply chain intelligence",
+        "Finance & legal AI workflows",
+      ],
+    },
+  ];
+
+  const industries = [
+    "Manufacturing",
+    "BFSI & Insurance",
+    "Government",
+    "Healthcare",
+    "Telecom",
+    "Education",
+    "Agriculture",
+    "Retail & Logistics",
+  ];
+
+  const customers = [
+    "UNO MINDA",
+    "FRANKE FABER",
+    "VESTIGE",
+    "MOTHERSON",
+    "JAQUAR",
+    "TATA ASSET MANAGEMENT",
+    "ADOBE INDIA",
+    "TELANGANA POLICE",
+    "PNB METLIFE",
+    "DR BATRA'S",
+    "CGMSC",
+    "ROADCAST",
+  ];
+
+  const testimonials = [
+    {
+      quote:
+        "AI LifeBOT helped us modernize customer engagement and automate enterprise workflows at scale.",
+      sector: "Manufacturing Enterprise",
+    },
+    {
+      quote:
+        "The voice-first AI experience improved operational responsiveness and customer interactions significantly.",
+      sector: "BFSI Organization",
+    },
+    {
+      quote:
+        "Strong expertise in enterprise AI automation and mission-critical workflow orchestration.",
+      sector: "Government Deployment",
+    },
+  ];
+
+  return (
+    <div className="bg-white text-slate-900 font-sans">
+      {/* Hero */}
+      <section className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white px-10 py-16 flex flex-col justify-between">
+        <div className="flex justify-between items-center">
+          <div>
+            <div className="text-4xl font-bold tracking-tight">AI LifeBOT</div>
+            <div className="text-slate-300 mt-2 text-lg">
+              Voice-First Autonomous AI Agents
+            </div>
+          </div>
+
+          <div className="border border-slate-600 rounded-full px-5 py-2 text-sm uppercase tracking-widest">
+            Enterprise AI
+          </div>
+        </div>
+
+        <div className="grid lg:grid-cols-2 gap-16 items-center mt-20">
+          <div>
+            <div className="text-sm uppercase tracking-[0.3em] text-slate-400 mb-5">
+              Enterprise Product Catalogue
+            </div>
+
+            <h1 className="text-6xl font-black leading-tight">
+              Building the Future of
+              <span className="block text-cyan-400">
+                Agentic Enterprise AI
+              </span>
+            </h1>
+
+            <p className="mt-8 text-xl leading-9 text-slate-300 max-w-2xl">
+              AI LifeBOT enables enterprises and governments to deploy
+              intelligent Voice-First AI Agents for Sales, Marketing,
+              Operations, HR, Supply Chain, Finance, Legal, Customer Service,
+              and Enterprise Decision Intelligence.
+            </p>
+
+            <div className="flex gap-5 mt-10 flex-wrap">
+              <div className="bg-white/10 border border-white/10 px-5 py-4 rounded-2xl backdrop-blur-sm">
+                <div className="text-3xl font-bold">75+</div>
+                <div className="text-slate-300 text-sm mt-1">
+                  Enterprise Deployments
+                </div>
+              </div>
+
+              <div className="bg-white/10 border border-white/10 px-5 py-4 rounded-2xl backdrop-blur-sm">
+                <div className="text-3xl font-bold">20+</div>
+                <div className="text-slate-300 text-sm mt-1">
+                  Industry Verticals
+                </div>
+              </div>
+
+              <div className="bg-white/10 border border-white/10 px-5 py-4 rounded-2xl backdrop-blur-sm">
+                <div className="text-3xl font-bold">AI</div>
+                <div className="text-slate-300 text-sm mt-1">
+                  Voice + Automation
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="relative">
+            <div className="absolute inset-0 bg-cyan-500 blur-3xl opacity-20 rounded-full"></div>
+
+            <div className="relative bg-white/5 border border-white/10 rounded-[32px] p-10 backdrop-blur-md shadow-2xl">
+              <div className="text-sm uppercase tracking-wider text-cyan-300 mb-6">
+                Enterprise AI Capabilities
+              </div>
+
+              <div className="space-y-5">
+                {[
+                  "Autonomous AI Agents",
+                  "Enterprise GPT Platforms",
+                  "Conversational AI Systems",
+                  "WhatsApp & Voice Automation",
+                  "AI Command Centres",
+                  "Multilingual AI",
+                ].map((item, index) => (
+                  <div
+                    key={index}
+                    className="bg-white/5 rounded-2xl px-5 py-4 border border-white/5"
+                  >
+                    <div className="font-medium">{item}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-16 text-sm text-slate-400 tracking-wider uppercase">
+          www.ailifebot.com
+        </div>
+      </section>
+
+      {/* About */}
+      <section className="px-10 py-24 bg-white">
+        <div className="max-w-7xl mx-auto grid lg:grid-cols-2 gap-16 items-center">
+          <div>
+            <div className="text-cyan-600 uppercase tracking-[0.25em] text-sm font-semibold mb-4">
+              About AI LifeBOT
+            </div>
+
+            <h2 className="text-5xl font-black leading-tight text-slate-900">
+              Enterprise AI Built for Real-World Business Operations
+            </h2>
+
+            <p className="mt-8 text-lg text-slate-600 leading-9">
+              AI LifeBOT is a deep-tech enterprise AI company focused on
+              building intelligent Voice-First Autonomous AI Agents that help
+              organizations automate workflows, improve customer engagement,
+              and enable intelligent decision-making.
+            </p>
+
+            <p className="mt-6 text-lg text-slate-600 leading-9">
+              Our enterprise-grade AI solutions are deployed across industries
+              including manufacturing, BFSI, healthcare, telecom, government,
+              education, retail, and logistics.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-6">
+            {[
+              "Voice-First AI",
+              "Agentic AI Automation",
+              "Enterprise GPT",
+              "AI Command Centres",
+              "Conversational AI",
+              "Workflow Intelligence",
+            ].map((item, idx) => (
+              <div
+                key={idx}
+                className="rounded-3xl border border-slate-200 p-8 shadow-sm hover:shadow-lg transition-all"
+              >
+                <div className="text-2xl font-bold text-slate-900">
+                  {item}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Solutions */}
+      <section className="px-10 py-24 bg-slate-50">
+        <div className="max-w-7xl mx-auto">
+          <div className="text-center max-w-4xl mx-auto">
+            <div className="text-cyan-600 uppercase tracking-[0.25em] text-sm font-semibold mb-4">
+              Enterprise Solutions
+            </div>
+
+            <h2 className="text-5xl font-black text-slate-900">
+              AI Solutions Portfolio
+            </h2>
+
+            <p className="mt-6 text-xl text-slate-600 leading-9">
+              Enterprise-ready AI systems designed to automate operations,
+              customer engagement, decision intelligence, and business
+              workflows.
+            </p>
+          </div>
+
+          <div className="grid lg:grid-cols-3 gap-8 mt-16">
+            {solutions.map((solution, idx) => (
+              <div
+                key={idx}
+                className="bg-white rounded-[32px] p-10 border border-slate-200 shadow-sm"
+              >
+                <div className="text-3xl font-black text-slate-900 leading-tight">
+                  {solution.title}
+                </div>
+
+                <div className="space-y-5 mt-8">
+                  {solution.points.map((point, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start gap-4 text-slate-700"
+                    >
+                      <div className="w-3 h-3 bg-cyan-500 rounded-full mt-2"></div>
+                      <div className="text-lg leading-8">{point}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Industries */}
+      <section className="px-10 py-24 bg-slate-950 text-white">
+        <div className="max-w-7xl mx-auto">
+          <div className="flex flex-col lg:flex-row justify-between gap-10 items-start">
+            <div className="max-w-3xl">
+              <div className="text-cyan-400 uppercase tracking-[0.25em] text-sm font-semibold mb-4">
+                Industry Verticals
+              </div>
+
+              <h2 className="text-5xl font-black leading-tight">
+                Trusted Across Multiple Industries
+              </h2>
+            </div>
+
+            <div className="text-slate-300 text-lg leading-8 max-w-2xl">
+              AI LifeBOT powers enterprise AI transformation initiatives across
+              public and private sector organizations with scalable automation,
+              conversational intelligence, and AI orchestration platforms.
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-4 gap-6 mt-16">
+            {industries.map((industry, idx) => (
+              <div
+                key={idx}
+                className="border border-white/10 bg-white/5 rounded-3xl p-8 text-center backdrop-blur-sm"
+              >
+                <div className="text-xl font-semibold">{industry}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Customers */}
+      <section className="px-10 py-24 bg-white">
+        <div className="max-w-7xl mx-auto">
+          <div className="text-center max-w-4xl mx-auto">
+            <div className="text-cyan-600 uppercase tracking-[0.25em] text-sm font-semibold mb-4">
+              Enterprise Customers
+            </div>
+
+            <h2 className="text-5xl font-black text-slate-900">
+              Selected Customers & Deployments
+            </h2>
+          </div>
+
+          <div className="grid md:grid-cols-4 gap-6 mt-16">
+            {customers.map((customer, idx) => (
+              <div
+                key={idx}
+                className="rounded-3xl border border-slate-200 p-8 bg-slate-50 text-center hover:shadow-lg transition-all"
+              >
+                <div className="text-lg font-bold text-slate-900">
+                  {customer}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Testimonials */}
+      <section className="px-10 py-24 bg-slate-50">
+        <div className="max-w-7xl mx-auto">
+          <div className="text-center max-w-4xl mx-auto">
+            <div className="text-cyan-600 uppercase tracking-[0.25em] text-sm font-semibold mb-4">
+              Customer Experience
+            </div>
+
+            <h2 className="text-5xl font-black text-slate-900">
+              What Enterprises Say About Us
+            </h2>
+          </div>
+
+          <div className="grid lg:grid-cols-3 gap-8 mt-16">
+            {testimonials.map((item, idx) => (
+              <div
+                key={idx}
+                className="bg-white rounded-[32px] p-10 border border-slate-200 shadow-sm"
+              >
+                <div className="text-6xl leading-none text-cyan-500">“</div>
+
+                <div className="text-xl leading-9 text-slate-700 mt-4">
+                  {item.quote}
+                </div>
+
+                <div className="mt-8 text-sm uppercase tracking-widest text-slate-500">
+                  {item.sector}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="px-10 py-24 bg-gradient-to-r from-cyan-600 to-slate-900 text-white">
+        <div className="max-w-6xl mx-auto text-center">
+          <div className="text-sm uppercase tracking-[0.3em] text-cyan-100 mb-6">
+            Future-Ready Enterprise AI
+          </div>
+
+          <h2 className="text-6xl font-black leading-tight">
+            Build Autonomous Enterprise Operations with AI LifeBOT
+          </h2>
+
+          <p className="mt-8 text-xl text-slate-200 leading-9 max-w-4xl mx-auto">
+            Deploy intelligent Voice-First AI Agents across Sales, Marketing,
+            HR, Customer Service, IT, Procurement, Legal, Finance, and Supply
+            Chain operations.
+          </p>
+
+          <div className="mt-12 flex flex-wrap justify-center gap-6">
+            <div className="bg-white text-slate-900 px-8 py-4 rounded-2xl font-semibold text-lg shadow-xl">
+              www.ailifebot.com
+            </div>
+
+            <div className="border border-white/30 px-8 py-4 rounded-2xl text-lg backdrop-blur-sm">
+              Enterprise AI Transformation Partner
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}

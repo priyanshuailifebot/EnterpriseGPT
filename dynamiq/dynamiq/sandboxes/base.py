@@ -1,0 +1,409 @@
+import abc
+import io
+import logging
+import mimetypes
+import shlex
+from enum import Enum
+from functools import cached_property
+from pathlib import Path
+from typing import Any, BinaryIO, ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from dynamiq.connections.connections import BaseConnection
+from dynamiq.nodes.node import Node
+from dynamiq.storages.file.base import FileInfo
+
+
+class SandboxTool(str, Enum):
+    """Enum for sandbox tool types."""
+
+    SHELL = "shell"
+
+
+class ShellCommandResult(BaseModel):
+    """Result of a shell command execution."""
+
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
+    background: bool = False
+    error: str | None = None
+
+    @property
+    def is_success(self) -> bool:
+        """Determine if the command execution was successful."""
+        return (self.exit_code == 0 or (self.exit_code is None and not self.stderr)) and self.error is None
+
+
+class SandboxInfo(BaseModel):
+    """Schema for sandbox metadata returned by get_sandbox_info()."""
+
+    base_path: str
+    sandbox_id: str | None = None
+    public_host: str | None = None
+    public_url: str | None = None
+    public_url_error: str | None = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class Sandbox(abc.ABC, BaseModel):
+    """Abstract base class for sandbox implementations.
+
+    This interface provides a unified way to interact with different
+    sandbox backends (in-memory, file system, E2B, Docker, etc.).
+    Sandboxes provide file storage and can be extended to support
+    code execution and other isolated environment capabilities.
+    """
+
+    connection: BaseConnection | None = Field(default=None, description="Connection to the sandbox backend.")
+    base_path: str = Field(default="/home/user", description="Base path in the sandbox filesystem.")
+    max_output_files: int = Field(
+        default=50, description="Maximum number of files to collect from the output directory."
+    )
+    _clone_shared: ClassVar[bool] = True
+
+    @computed_field
+    @cached_property
+    def type(self) -> str:
+        """Returns the backend type as a string."""
+        return f"{self.__module__.rsplit('.', 1)[0]}.{self.__class__.__name__}"
+
+    @property
+    def to_dict_exclude_params(self) -> dict[str, bool]:
+        """Define parameters to exclude during serialization."""
+        return {"connection": True}
+
+    def _resolve_path(self, file_path: str) -> str:
+        """Resolve relative file paths against sandbox base path."""
+        if file_path.startswith("/"):
+            return file_path
+        return f"{self.base_path.rstrip('/')}/{file_path.lstrip('/')}"
+
+    def to_dict(self, **kwargs) -> dict[str, Any]:
+        """Convert the Sandbox instance to a dictionary.
+
+        Args:
+            for_tracing: If True, exclude sensitive fields like connection credentials.
+
+        Returns:
+            dict: Dictionary representation of the Sandbox instance.
+        """
+        for_tracing = kwargs.pop("for_tracing", False)
+        kwargs.pop("include_secure_params", None)
+        exclude = kwargs.pop("exclude", self.to_dict_exclude_params)
+
+        has_connection = getattr(self, "connection", None) is not None
+        data = self.model_dump(exclude=exclude, **kwargs)
+        data["type"] = self.type
+
+        if has_connection:
+            data["connection"] = self.connection.to_dict(for_tracing=for_tracing, **kwargs)
+
+        return data
+
+    def run_command_shell(
+        self,
+        command: str,
+        timeout: int = 60,
+        run_in_background_enabled: bool = False,
+    ) -> ShellCommandResult:
+        """Execute a shell command in the sandbox.
+
+        This is an optional capability. Subclasses that support command execution
+        should override this method. The base implementation raises NotImplementedError.
+
+        Args:
+            command: Shell command or script to execute.
+            timeout: Timeout in seconds (default 60).
+            run_in_background_enabled: If True, run command in background (no output).
+
+        Returns:
+            ShellCommandResult with stdout, stderr, and exit_code.
+
+        Raises:
+            NotImplementedError: If the sandbox does not support command execution.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support command execution. "
+            "Use a sandbox backend that supports shell commands (e.g., E2BSandbox)."
+        )
+
+    @abc.abstractmethod
+    def get_tools(self, llm: Any = None) -> list[Node]:
+        """Return tools this sandbox provides for agent use.
+
+        Subclasses must implement this method to return tools specific
+        to their sandbox type. Tools are configured via the `tools` field.
+
+        Args:
+            llm: Optional LLM instance passed to tools that require one (e.g. FileReadTool).
+
+        Returns:
+            List of tool instances (Node objects).
+        """
+        ...
+
+    def upload_file(
+        self,
+        file_name: str,
+        content: bytes,
+        destination_path: str | None = None,
+        ensure_parent_dirs: bool = True,
+    ) -> str:
+        """Upload a file to the sandbox.
+
+        Args:
+            file_name: Name of the file.
+            content: File content as bytes.
+            destination_path: Optional destination path in sandbox. If None, uses base_path/file_name.
+            ensure_parent_dirs: When True, create parent directories with mkdir -p before upload
+                so existing directories do not cause errors (e.g. re-ingesting skills).
+
+        Returns:
+            The path where the file was uploaded in the sandbox.
+
+        Raises:
+            NotImplementedError: If the sandbox does not support file uploads.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support file uploads. "
+            "Use a sandbox backend that supports file operations (e.g., E2BSandbox)."
+        )
+
+    def list_files(self, target_dir: str | None = None) -> list[str]:
+        """List files in the sandbox directory.
+
+        Args:
+            target_dir: Directory to list. Defaults to the output directory.
+
+        Implementations should respect ``max_output_files`` when scanning
+        for files.
+
+        Returns:
+            List of absolute file paths found in the directory.
+
+        Raises:
+            NotImplementedError: If the sandbox does not support file listing.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support file listing. "
+            "Use a sandbox backend that supports file operations (e.g., E2BSandbox)."
+        )
+
+    def collect_files(self, target_dir: str | None = None, file_paths: list[str] | None = None) -> list[io.BytesIO]:
+        """Collect files from the sandbox directory as BytesIO objects.
+
+        Args:
+            target_dir: Directory to collect files from. Defaults to the base path.
+            file_paths: List of file paths to collect. If None, all files in the target directory are collected.
+
+        Returns:
+            List of BytesIO objects with name, description, and content_type attributes.
+
+        Raises:
+            FileNotFoundError: If explicit ``file_paths`` were requested and any
+                of them could not be retrieved.
+        """
+        file_paths_requested = bool(file_paths)
+
+        if file_paths_requested:
+            resolved: list[str] = []
+            for file_path in file_paths:
+                if not file_path.startswith("/"):
+                    file_path = f"{self.base_path.rstrip('/')}/{file_path.lstrip('/')}"
+                resolved.append(file_path)
+            file_paths = resolved
+
+        if not file_paths:
+            file_paths = self.list_files(target_dir=target_dir)
+
+        if not file_paths:
+            return []
+
+        result_files: list[io.BytesIO] = []
+        for file_path in file_paths:
+            file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+            try:
+                content = self.retrieve(file_path)
+                content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+
+                file_bytesio = io.BytesIO(content)
+                file_bytesio.name = file_name
+                file_bytesio.description = f"Generated file from sandbox: {file_path}"
+                file_bytesio.content_type = content_type
+                file_bytesio.seek(0)
+
+                result_files.append(file_bytesio)
+            except Exception as e:
+                if file_paths_requested:
+                    raise FileNotFoundError(f"Failed to download requested file '{file_path}': {e}") from e
+                logging.getLogger(__name__).warning(f"Failed to download file '{file_path}': {e}")
+                continue
+
+        return result_files
+
+    def exists(self, file_path: str) -> bool:
+        """Check whether a file exists in the sandbox filesystem.
+
+        Required for FileReadTool compatibility.
+
+        Args:
+            file_path: Path to the file (relative or absolute).
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            NotImplementedError: If the sandbox does not support file existence checks.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support file existence checks. "
+            "Use a sandbox backend that supports file operations (e.g., E2BSandbox)."
+        )
+
+    def retrieve(self, file_path: str) -> bytes:
+        """Read file content from the sandbox filesystem.
+
+        Required for FileReadTool compatibility.
+
+        Args:
+            file_path: Path to the file (relative or absolute).
+
+        Returns:
+            The file content as bytes.
+
+        Raises:
+            NotImplementedError: If the sandbox does not support file retrieval.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support file retrieval. "
+            "Use a sandbox backend that supports file operations (e.g., E2BSandbox)."
+        )
+
+    def delete_file(self, file_path: str) -> bool:
+        """Delete a file from the sandbox filesystem.
+
+        Default implementation routes through ``run_command_shell`` with ``rm -f``,
+        which is portable across every concrete sandbox backend. Subclasses may
+        override to use a vendor-native delete primitive if available.
+
+        Args:
+            file_path: Path to the file (relative paths resolved against base_path).
+
+        Returns:
+            True if the file was removed (or was already absent), False otherwise.
+            Never raises — callers can treat the boolean as authoritative.
+        """
+        try:
+            resolved_path = self._resolve_path(file_path)
+            result = self.run_command_shell(f"rm -f {shlex.quote(resolved_path)}")
+            return getattr(result, "is_success", True)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"{self.__class__.__name__}.delete_file({file_path}) failed: {e}")
+            return False
+
+    def apply_public_preview_branding(
+        self, public_host: str | None, public_url: str | None
+    ) -> tuple[str | None, str | None]:
+        """Map public host/URL to a proxied preview domain when the backend overrides this."""
+        return public_host, public_url
+
+    def get_sandbox_info(self, port: int | None = None) -> SandboxInfo:
+        """Return sandbox metadata for the agent (e.g. base_path, optional public URL for a port).
+
+        Subclasses that support a public URL (e.g. E2B) may override and include
+        sandbox_id, public_host, and public_url when port is provided.
+
+        Args:
+            port: Optional port number; if provided and the backend supports it,
+                the returned schema may include public_host and public_url.
+
+        Returns:
+            SandboxInfo with at least base_path; backends may add
+            sandbox_id, public_host, public_url (when port is given), etc.
+        """
+        return SandboxInfo(
+            base_path=self.base_path,
+        )
+
+    def store(
+        self,
+        file_path: str | Path,
+        content: str | bytes | BinaryIO,
+        content_type: str = None,
+        metadata: dict[str, Any] = None,
+        overwrite: bool = False,
+    ) -> FileInfo:
+        """Store a file in the sandbox filesystem.
+
+        Provides FileStore-compatible write interface so tools like
+        file-write work transparently with both backends.
+
+        Args:
+            file_path: Destination path (relative paths resolved against base_path).
+            content: File content as string, bytes, or file-like object.
+            content_type: MIME type of the file content.
+            metadata: Additional metadata to attach to the returned FileInfo.
+            overwrite: Ignored for sandbox (always overwrites).
+
+        Returns:
+            FileInfo with details about the stored file.
+        """
+        resolved_path = self._resolve_path(str(file_path))
+
+        if isinstance(content, str):
+            raw = content.encode("utf-8")
+        elif hasattr(content, "read"):
+            raw = content.read()
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+        else:
+            raw = content
+
+        file_name = resolved_path.rsplit("/", 1)[-1] if "/" in resolved_path else resolved_path
+        dest = self.upload_file(file_name, raw, destination_path=resolved_path)
+
+        return FileInfo(
+            name=file_name,
+            path=dest,
+            size=len(raw),
+            content_type=content_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+            metadata=metadata or {},
+            content=raw,
+        )
+
+    def close(self) -> None:
+        """Close the sandbox."""
+        raise NotImplementedError(f"Implementation of close() is not implemented for {self.__class__.__name__}")
+
+
+class SandboxConfig(BaseModel):
+    """Configuration for sandbox and related features.
+
+    Attributes:
+        enabled: Whether sandbox is enabled.
+        backend: The sandbox backend to use.
+        config: Additional configuration options.
+    """
+
+    enabled: bool = False
+    backend: Sandbox = Field(..., description="Sandbox backend to use.")
+    config: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def to_dict_exclude_params(self) -> dict[str, bool]:
+        """Define parameters to exclude during serialization."""
+        return {"backend": True}
+
+    def to_dict(self, **kwargs) -> dict[str, Any]:
+        """Convert the SandboxConfig instance to a dictionary."""
+        for_tracing = kwargs.pop("for_tracing", False)
+        kwargs.pop("include_secure_params", None)
+        exclude = kwargs.pop("exclude", self.to_dict_exclude_params)
+        config_data = self.model_dump(exclude=exclude, **kwargs)
+        config_data["backend"] = self.backend.to_dict(for_tracing=for_tracing, **kwargs)
+        return config_data

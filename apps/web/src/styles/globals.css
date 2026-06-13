@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --border: 240 3.7% 15.9%;
+  }
+
+  html,
+  body {
+    @apply bg-white text-slate-900 antialiased;
+  }
+
+  .dark html,
+  .dark body {
+    @apply bg-slate-950 text-slate-100;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+}
+
+/* React Flow dark-mode polish for Controls + MiniMap. */
+.dark .react-flow__controls-button {
+  background-color: rgb(15 23 42);
+  color: rgb(226 232 240);
+  border-bottom: 1px solid rgb(51 65 85);
+}
+.dark .react-flow__controls-button:hover {
+  background-color: rgb(30 41 59);
+}
+.dark .react-flow__controls-button svg {
+  fill: rgb(226 232 240);
+}
+.dark .react-flow__minimap {
+  background-color: rgb(15 23 42);
+}
+.dark .react-flow__attribution {
+  background-color: transparent;
+}
+.dark .react-flow__edge-path {
+  stroke: rgb(148 163 184);
+}
+
+/* Execution status overlay — set as ``className`` on each Node from the
+   interactive canvas. The colored ring + halo make the SSE stream
+   visible at a glance, mirroring n8n's per-node run indicators. */
+.react-flow__node.egpt-run-running > div {
+  box-shadow: 0 0 0 2px rgb(59 130 246), 0 0 0 6px rgba(59, 130, 246, 0.25);
+  animation: egpt-pulse 1.6s ease-in-out infinite;
+}
+.react-flow__node.egpt-run-done > div {
+  box-shadow: 0 0 0 2px rgb(16 185 129), 0 0 0 6px rgba(16, 185, 129, 0.18);
+}
+.react-flow__node.egpt-run-error > div {
+  box-shadow: 0 0 0 2px rgb(244 63 94), 0 0 0 6px rgba(244, 63, 94, 0.22);
+}
+.react-flow__node.egpt-run-waiting > div {
+  box-shadow: 0 0 0 2px rgb(245 158 11), 0 0 0 6px rgba(245, 158, 11, 0.2);
+}
+.react-flow__node.egpt-run-skipped > div {
+  opacity: 0.55;
+  box-shadow: 0 0 0 2px rgb(148 163 184);
+}
+
+/* Action node whose integration isn't connected yet — n8n-style "needs
+   credentials" marker. Shown when not mid-run; click the node to connect. */
+.react-flow__node.egpt-needs-conn > div {
+  position: relative;
+  box-shadow: 0 0 0 1.5px rgb(245 158 11);
+}
+.react-flow__node.egpt-needs-conn > div::after {
+  content: "⚠ connect";
+  position: absolute;
+  top: -9px;
+  right: -6px;
+  background: rgb(245 158 11);
+  color: white;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@keyframes egpt-pulse {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.08); }
+}
+

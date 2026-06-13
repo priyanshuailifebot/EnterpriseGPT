@@ -1,0 +1,80 @@
+connections:
+  anthropic-conn:
+    type: dynamiq.connections.Anthropic
+    api_key: ${oc.env:ANTHROPIC_API_KEY}
+  e2b-conn:
+    type: dynamiq.connections.E2B
+    api_key: ${oc.env:E2B_API_KEY}
+  dynamiq-api-conn:
+    type: dynamiq.connections.Dynamiq
+    url: ${oc.env:DYNAMIQ_URL}
+    api_key: ${oc.env:DYNAMIQ_API_KEY}
+
+nodes:
+  registry-skills-agent:
+    type: dynamiq.nodes.agents.Agent
+    llm:
+      id: registry-skills-agent-llm
+      type: dynamiq.nodes.llms.Anthropic
+      connection: anthropic-conn
+      model: claude-sonnet-4-6
+      max_tokens: 32000
+    tools: []
+    role: |
+      Map deliverables to skills: Word / .docx → docx; PDF → pdf; PowerPoint / .pptx → pptx; Excel / .xlsx → xlsx; Markdown/HTML → md; landing page / web UI / frontend → frontend-design; React/shadcn multi-component artifact → web-artifacts-builder; poster / visual art / canvas → canvas-design.
+      Write all output files to /home/user/output so they are collected. Uploaded files from the user go to /home/user/input.
+      Web app / website tasks (e.g. recreate a marketing site like getdynamiq.ai): Use frontend-design for a single-page HTML/CSS/JS site, or web-artifacts-builder for a React/shadcn multi-component app. Include hero, value propositions, feature sections, and footer as appropriate. Output must have a proper structure: use folders and subfolders as needed (e.g. index.html, css/, js/, assets/, images/)—not only a single file. Save the full artifact tree to /home/user/output (all files and folders so they are collected). Optionally also create a zip archive of the artifact (e.g. zip -r artifact.zip . from the project root) and place the zip in /home/user/output for a single downloadable bundle. If the task asks for a "live" or "viewable" link: start the dev server in the background (sandbox shell with run_in_background_enabled=true, e.g. npm run dev or npx vite), then call SandboxInfoTool with that port (e.g. 5173) to get the public URL, and include that URL clearly in your final answer (e.g. "Preview URL: https://..."). Otherwise deliver the static files (and zip if created) for local viewing.
+      Do not mention skills or paths in the user-facing reply; just accomplish the task and save outputs to the output directory.
+    sandbox:
+      enabled: true
+      backend:
+        type: dynamiq.sandboxes.E2BSandbox
+        connection: e2b-conn
+    skills:
+      enabled: true
+      source:
+        type: dynamiq.skills.registries.Dynamiq
+        connection: dynamiq-api-conn
+        sandbox_skills_base_path: "/home/user/skills"
+        skills:
+          - id: "a8b8785d-e5fb-4076-8cb8-804b4017d840"
+            version_id: "latest"
+            name: docx
+            description: Create, read, edit, and manipulate Word documents (.docx); reports, memos, letters, templates; Markdown/HTML to docx via pandoc.
+          - id: "afde47e6-98af-421d-81f9-e1b7800013e9"
+            version_id: "latest"
+            name: pdf
+            description: PDF creation, form filling, extraction, conversion, and validation; Markdown/HTML to PDF via pandoc or docx→PDF.
+          - id: "ec8afb35-b38e-464a-b4be-883512437a3e"
+            version_id: "latest"
+            name: pptx
+            description: Create, edit, and manipulate PowerPoint presentations (.pptx); design and QA rules, scripts for thumbnail, pack, soffice.
+          - id: "c5aa8832-739c-4366-ad58-e3dce7378b05"
+            version_id: "latest"
+            name: xlsx
+            description: Create, edit, and manipulate Excel spreadsheets (.xlsx); formulas, recalc, dashboard and R-ready rules.
+          - id: "d3e56ec7-62e0-4706-896c-4ffe98a82225"
+            version_id: "latest"
+            name: md
+            description: Markdown and HTML as source or target; convert md/html to or from docx, pdf, pptx using pandoc and markitdown.
+          - id: "b4d320e2-c722-43c6-b9d9-d57c75757d6f"
+            version_id: "latest"
+            name: frontend-design
+            description: Create distinctive, production-grade frontend interfaces; web components, pages, dashboards, HTML/CSS/JS or React; avoid generic AI aesthetics.
+          - id: "f1665145-5a21-4524-a162-675f4fed81bc"
+            version_id: "latest"
+            name: web-artifacts-builder
+            description: React + TypeScript + Vite + Tailwind + shadcn/ui artifacts; init-artifact.sh, bundle-artifact.sh for single HTML artifact.
+    max_loops: 100
+    inference_mode: XML
+
+flows:
+  registry-skills-flow:
+    name: Registry skills + E2B sandbox
+    nodes:
+      - registry-skills-agent
+
+workflows:
+  registry-skills-sandbox-workflow:
+    flow: registry-skills-flow
+    version: 1

@@ -1,0 +1,216 @@
+from datetime import datetime, timezone
+from enum import Enum
+from functools import cached_property
+from queue import Queue
+from threading import Event
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, field_validator
+
+from dynamiq.utils import generate_uuid, serialize_files_in_value
+
+
+class StreamingMode(str, Enum):
+    """Enumeration for streaming modes."""
+
+    FINAL = "final"  # Streams only final output in agents nodes.
+    ALL = "all"  # Streams all intermediate steps and final output in agents and llms nodes.
+
+
+STREAMING_EVENT = "streaming"
+
+
+class StreamingEntitySource(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    group: str | None = None
+    type: str | None = None
+
+
+class StreamingEventMessage(BaseModel):
+    """Message for streaming events.
+
+    Attributes:
+        run_id (str | None): Run ID.
+        wf_run_id (str | None): Workflow run ID. Defaults to a generated UUID.
+        entity_id (str): Entity ID.
+        data (Any): Data associated with the event.
+        event (str | None): Event name. Defaults to "streaming".
+        source (StreamingEntitySource | None): Entity details.
+    """
+
+    run_id: str | None = None
+    wf_run_id: str | None = Field(default_factory=generate_uuid)
+    entity_id: str | None = None
+    data: Any
+    event: str | None = None
+    source: StreamingEntitySource | None = None
+
+    @field_validator("event")
+    @classmethod
+    def set_event(cls, value: str | None) -> str:
+        """Set the event name.
+
+        Args:
+            value (str | None): Event name.
+
+        Returns:
+            str: Event name or default.
+        """
+        return value or STREAMING_EVENT
+
+    def to_dict(self, **kwargs) -> dict:
+        """Convert to dictionary.
+
+        Returns:
+            dict: Dictionary representation.
+        """
+        return self.model_dump(**kwargs)
+
+    def to_json(self, **kwargs) -> str:
+        """Convert to JSON string.
+
+        Returns:
+            str: JSON string representation.
+        """
+        return self.model_dump_json(**kwargs)
+
+
+class StreamingThought(BaseModel):
+    """Model for reasoning/thought streaming chunks."""
+
+    thought: str
+
+    model_config = ConfigDict(extra="forbid")
+
+    def to_dict(self, **kwargs) -> dict:
+        return self.model_dump(**kwargs)
+
+
+class AgentToolData(BaseModel):
+    """Model for tool information in agent reasoning events."""
+
+    name: str
+    type: str
+    action_type: str | None = None
+
+
+class AgentReasoningEventMessageData(BaseModel):
+    """Model for agent reasoning streaming event data."""
+
+    tool_run_id: str
+    thought: str
+    action: str
+    tool: AgentToolData
+    action_input: Any
+    loop_num: int
+
+
+class AgentToolInputStartData(BaseModel):
+    """Emitted once when tool_input streaming begins for a tool call."""
+
+    tool_run_id: str
+    action: str
+    tool: AgentToolData
+    loop_num: int
+
+
+class AgentToolInputDeltaData(BaseModel):
+    """Lean delta for tool_input streaming. Only tool_run_id and action_input change."""
+
+    tool_run_id: str
+    action_input: Any
+
+
+class AgentToolInputErrorEventMessageData(BaseModel):
+    """Emitted when action parsing fails after tool input was already
+    partially streamed, so consumers can discard the invalid chunks.
+    """
+
+    tool_run_id: str
+    name: str
+    error: str
+    loop_num: int
+
+
+class AgentToolResultEventMessageData(BaseModel):
+    """Model for agent tool result streaming event data."""
+
+    tool_run_id: str
+    name: str
+    tool: AgentToolData
+    input: Any
+    result: Any
+    files: list = Field(default_factory=list)
+    loop_num: int
+    output: dict[str, Any] | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = "success"
+
+    def to_dict(self, **kwargs) -> dict:
+        """Convert to dictionary with file objects serialized as base64.
+
+        Returns:
+            dict: Dictionary representation with all BytesIO/bytes values
+                in files, result, input, and output converted to
+                ``{"content": "<base64>", "size": ..., "name": ..., "mime_type": ...}``.
+        """
+        data = super().model_dump(**kwargs)
+        data["files"] = serialize_files_in_value(self.files)
+        data["result"] = serialize_files_in_value(self.result)
+        data["input"] = serialize_files_in_value(self.input)
+        if self.output is not None:
+            data["output"] = serialize_files_in_value(self.output)
+        return data
+
+
+class StreamingConfig(BaseModel):
+    """Configuration for streaming.
+
+    Attributes:
+        enabled (bool): Whether streaming is enabled. Defaults to False.
+        stream_tool_input (list[str] | None): Allowlist of tool names whose inputs should be
+            streamed. None means all tool inputs are streamed. Defaults to None.
+        event (str): Event name. Defaults to "streaming".
+        timeout (float | None): Timeout for streaming. Defaults to 600 seconds.
+        input_queue (Queue | None): Input queue for streaming. Defaults to None.
+        input_queue_done_event (Event | None): Event to signal input queue completion. Defaults to None.
+        input_queue_poll_interval (float): Poll interval for checking done_event during input queue wait.
+            Shorter interval allows faster response to cancellation. Defaults to 5.0 second.
+        mode (StreamingMode): Streaming mode. Defaults to StreamingMode.ANSWER.
+        include_usage (bool): Whether to include usage information. Defaults to False.
+        min_chunk_chars (int): Minimum number of characters to accumulate before emitting
+            a streaming event. Helps reduce event count by combining small fragments.
+            0 means no accumulation (emit immediately). Defaults to 0.
+    """
+    enabled: bool = False
+    stream_tool_input: list[str] | None = None
+    event: str = STREAMING_EVENT
+    timeout: PositiveFloat | None = 600.0
+    input_queue: Queue | None = None
+    input_queue_done_event: Event | None = None
+    input_queue_poll_interval: PositiveFloat = 5.0
+    mode: StreamingMode = StreamingMode.FINAL
+    include_usage: bool = False
+    min_chunk_chars: NonNegativeInt = 0
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @cached_property
+    def input_streaming_enabled(self) -> bool:
+        """Check if input streaming is enabled.
+
+        Returns:
+            bool: True if input streaming is enabled, False otherwise.
+        """
+        return self.enabled and self.input_queue
+
+    def to_dict(self, for_tracing: bool = False, **kwargs) -> dict:
+        if for_tracing and not self.enabled:
+            return {"enabled": False}
+        if for_tracing:
+            return self.model_dump(
+                exclude={"input_queue", "input_queue_done_event"},
+                **kwargs,
+            )
+        return self.model_dump(**kwargs)

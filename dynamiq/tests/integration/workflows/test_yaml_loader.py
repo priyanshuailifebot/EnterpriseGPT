@@ -1,0 +1,677 @@
+import pytest
+
+from dynamiq.serializers.loaders.yaml import WorkflowYAMLLoader, WorkflowYAMLLoaderException
+from dynamiq.serializers.types import RequirementData
+
+OPENAI_NODE = "dynamiq.nodes.llms.OpenAI"
+ANTHROPIC_NODE = "dynamiq.nodes.llms.Anthropic"
+OPENAI_CONN = "dynamiq.connections.OpenAI"
+ANTHROPIC_CONN = "dynamiq.connections.Anthropic"
+AGENT_NODE = "dynamiq.nodes.agents.Agent"
+
+NODE_1 = "node1"
+NODE_2 = "node2"
+CONN_1 = "conn-1"
+CONN_2 = "conn-2"
+CONN_REGULAR = "regular"
+AGENT_ID = "agent-1"
+AGENT_ID_2 = "agent-2"
+LLM_ID = "agent-llm"
+LLM_ID_2 = "agent-llm-2"
+
+REQ_1 = "req-1"
+REQ_2 = "req-2"
+REQ_IGNORED = "ignored"
+REQ_MISSING = "missing"
+REQ_OTHER = "other"
+
+API_KEY = "test-api-key"
+MODEL_GPT = "gpt-4o"
+
+EXTERNAL_USER_ID = "user-abc-123"
+ACCOUNT_ID = "acc-456"
+SECRET_TOKEN = "secret-token-123"
+REFRESH_TOKEN = "refresh-xyz"
+EXTRACTED_NAME = "extracted-name"
+CONN_ID_RESOLVED = "conn-id-123"
+
+VP_EXTERNAL_USER_ID = "$.external_user_id"
+VP_ACCOUNT_ID = "$.account_id"
+VP_CREDENTIALS_TOKEN = "$.credentials.token"
+
+RESOLVED_USER_REQUIREMENT = {"external_user_id": EXTERNAL_USER_ID, "account_id": ACCOUNT_ID}
+
+
+@pytest.fixture
+def single_requirement_data():
+    return {
+        "nodes": {
+            NODE_1: {
+                "type": OPENAI_NODE,
+                "connection": {"$type": "connection", "$id": REQ_1},
+            }
+        }
+    }
+
+
+@pytest.fixture
+def multiple_requirements_data():
+    return {
+        "nodes": {
+            NODE_1: {
+                "type": OPENAI_NODE,
+                "connection": {"$type": "connection", "$id": REQ_1},
+            },
+            NODE_2: {
+                "type": ANTHROPIC_NODE,
+                "connection": {"$type": "connection", "$id": REQ_2},
+            },
+        }
+    }
+
+
+@pytest.fixture
+def regular_connection_data():
+    return {
+        "connections": {CONN_1: {"type": OPENAI_CONN, "api_key": API_KEY}},
+        "nodes": {NODE_1: {"type": OPENAI_NODE, "connection": CONN_1}},
+    }
+
+
+@pytest.fixture
+def schema_fields_data():
+    return {
+        "nodes": {
+            NODE_1: {
+                "type": OPENAI_NODE,
+                "schema": {"$type": "schema", "$id": REQ_IGNORED},
+                "response_format": {"$type": "format", "$id": REQ_IGNORED},
+                "connection": {"$type": "connection", "$id": REQ_1},
+            }
+        }
+    }
+
+
+@pytest.fixture
+def parseable_data():
+    return {
+        "connections": {},
+        "nodes": {
+            NODE_1: {
+                "type": OPENAI_NODE,
+                "model": MODEL_GPT,
+                "connection": {"$type": "connection", "$id": REQ_1},
+            }
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+
+@pytest.fixture
+def mixed_connections_data():
+    return {
+        "connections": {CONN_REGULAR: {"type": ANTHROPIC_CONN, "api_key": API_KEY}},
+        "nodes": {
+            NODE_1: {"type": ANTHROPIC_NODE, "model": "claude-4-sonnet", "connection": CONN_REGULAR},
+            NODE_2: {
+                "type": OPENAI_NODE,
+                "model": MODEL_GPT,
+                "connection": {"$type": "connection", "$id": REQ_1},
+            },
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+
+def test_get_requirements_extracts_single(single_requirement_data):
+    requirements = WorkflowYAMLLoader.get_requirements(single_requirement_data)
+
+    assert len(requirements) == 1
+    assert requirements[0].id == REQ_1
+    assert requirements[0].type == "connection"
+
+
+def test_get_requirements_extracts_multiple(multiple_requirements_data):
+    requirements = WorkflowYAMLLoader.get_requirements(multiple_requirements_data)
+
+    assert len(requirements) == 2
+    assert {r.id for r in requirements} == {REQ_1, REQ_2}
+
+
+def test_get_requirements_returns_empty_when_none(regular_connection_data):
+    assert WorkflowYAMLLoader.get_requirements(regular_connection_data) == []
+
+
+def test_get_requirements_ignores_schema_fields(schema_fields_data):
+    """Verify that schema and response_format fields are skipped."""
+    requirements = WorkflowYAMLLoader.get_requirements(schema_fields_data)
+
+    assert len(requirements) == 1
+    assert requirements[0].id == REQ_1
+
+
+def test_get_requirements_requires_both_type_and_id():
+    """Verify that both $type and $id are required to identify a requirement."""
+    data_with_only_id = {"nodes": {NODE_1: {"connection": {"$id": REQ_1}}}}
+    data_with_only_type = {"nodes": {NODE_1: {"connection": {"$type": "connection"}}}}
+    data_with_both = {"nodes": {NODE_1: {"connection": {"$type": "connection", "$id": REQ_1}}}}
+
+    assert WorkflowYAMLLoader.get_requirements(data_with_only_id) == []
+    assert WorkflowYAMLLoader.get_requirements(data_with_only_type) == []
+
+    result = WorkflowYAMLLoader.get_requirements(data_with_both)
+    assert len(result) == 1
+    assert result[0].id == REQ_1
+    assert result[0].type == "connection"
+
+
+def test_requirement_data_model():
+    """Verify RequirementData model works correctly."""
+    req = RequirementData.model_validate({"$type": "connection", "$id": REQ_1})
+
+    assert req.type == "connection"
+    assert req.id == REQ_1
+
+
+def test_requirement_data_from_dict():
+    """Verify RequirementData.from_dict works correctly."""
+    result = RequirementData.from_dict({"$type": "connection", "$id": REQ_1})
+
+    assert result is not None
+    assert result.type == "connection"
+    assert result.id == REQ_1
+
+
+def test_requirement_data_from_dict_returns_none_without_type():
+    assert RequirementData.from_dict({"$id": REQ_1}) is None
+
+
+def test_requirement_data_from_dict_returns_none_without_id():
+    assert RequirementData.from_dict({"$type": "connection"}) is None
+
+
+def test_requirement_data_from_dict_returns_none_for_empty():
+    assert RequirementData.from_dict({}) is None
+
+
+def test_apply_resolved_replaces_requirement_dict(single_requirement_data):
+    """Verify that requirement dict is completely replaced with resolved data."""
+    resolved_data = {"type": OPENAI_CONN, "api_key": API_KEY, "id": CONN_ID_RESOLVED}
+    WorkflowYAMLLoader.apply_resolved_requirements(single_requirement_data, {REQ_1: resolved_data})
+
+    connection = single_requirement_data["nodes"][NODE_1]["connection"]
+    assert connection == resolved_data
+    assert "$id" not in connection
+    assert "$type" not in connection
+
+
+def test_apply_resolved_replaces_entire_dict():
+    """Verify that original fields in requirement dict are removed after resolution."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "connection": {
+                    "$type": "connection",
+                    "$id": REQ_1,
+                    "url": "https://custom.api.com",
+                }
+            }
+        }
+    }
+    resolved_url = "https://resolved.api.com"
+
+    resolved_data = {"type": OPENAI_CONN, "api_key": API_KEY, "url": resolved_url}
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_data})
+
+    connection = data["nodes"][NODE_1]["connection"]
+    assert connection == resolved_data
+    assert connection["url"] == resolved_url
+
+
+def test_apply_resolved_raises_on_missing():
+    data = {"nodes": {NODE_1: {"connection": {"$type": "connection", "$id": REQ_MISSING}}}}
+
+    with pytest.raises(WorkflowYAMLLoaderException) as exc_info:
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_OTHER: {"api_key": API_KEY}})
+
+    assert REQ_MISSING in str(exc_info.value)
+
+
+def test_apply_resolved_handles_empty_data_no_requirements():
+    data = {"nodes": {NODE_1: {"type": OPENAI_NODE}}}
+    original = {"nodes": {NODE_1: {"type": OPENAI_NODE}}}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {})
+
+    assert data == original
+
+
+def test_apply_resolved_raises_on_empty_resolved_with_requirements():
+    """Verify that empty resolved_requirements raises when data contains requirements."""
+    data = {"nodes": {NODE_1: {"connection": {"$type": "connection", "$id": REQ_1}}}}
+
+    with pytest.raises(WorkflowYAMLLoaderException) as exc_info:
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {})
+
+    assert REQ_1 in str(exc_info.value)
+
+
+def test_apply_resolved_ignores_dict_with_only_id():
+    """Verify that dicts with only $id (no $type) are not treated as requirements."""
+    data = {"nodes": {NODE_1: {"connection": {"$id": REQ_1, "some_field": "value"}}}}
+    original_connection = {"$id": REQ_1, "some_field": "value"}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: {"api_key": API_KEY}})
+
+    # Should remain unchanged since $type is missing
+    assert data["nodes"][NODE_1]["connection"] == original_connection
+
+
+def test_inline_connection_with_resolved_requirement(parseable_data):
+    """Verify that resolved requirement provides complete connection data."""
+    resolved_connection = {"type": OPENAI_CONN, "api_key": API_KEY, "id": "resolved-conn-id"}
+    WorkflowYAMLLoader.apply_resolved_requirements(parseable_data, {REQ_1: resolved_connection})
+    result = WorkflowYAMLLoader.parse(parseable_data, init_components=False)
+
+    assert "resolved-conn-id" in result.connections
+    assert result.connections["resolved-conn-id"].id == "resolved-conn-id"
+
+
+def test_inline_connection_generates_uuid_if_no_id():
+    """Verify that a UUID is generated for inline connection if id is not provided."""
+    data = {
+        "connections": {},
+        "nodes": {
+            NODE_1: {
+                "type": OPENAI_NODE,
+                "model": MODEL_GPT,
+                "connection": {"$type": "connection", "$id": REQ_1},
+            }
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+    resolved_connection = {"type": OPENAI_CONN, "api_key": API_KEY}  # No id provided
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_connection})
+    result = WorkflowYAMLLoader.parse(data, init_components=False)
+
+    # Should have exactly one connection with a generated UUID
+    assert len(result.connections) == 1
+    conn_id = list(result.connections.keys())[0]
+    assert result.connections[conn_id].api_key == API_KEY
+
+
+def test_mixed_connections_work_together(mixed_connections_data):
+    """Verify that regular and inline connections work together."""
+    resolved_connection = {"type": OPENAI_CONN, "api_key": API_KEY, "id": "resolved-conn"}
+    WorkflowYAMLLoader.apply_resolved_requirements(mixed_connections_data, {REQ_1: resolved_connection})
+    result = WorkflowYAMLLoader.parse(mixed_connections_data, init_components=False)
+
+    assert len(result.connections) == 2
+    assert CONN_REGULAR in result.connections
+    assert "resolved-conn" in result.connections
+
+
+def test_apply_resolved_with_string_value():
+    """Verify that resolved value can be a string."""
+    data = {"nodes": {NODE_1: {"api_key": {"$type": "secret", "$id": REQ_1}}}}
+    secret_key = "my-secret-api-key"
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: secret_key})
+
+    assert data["nodes"][NODE_1]["api_key"] == secret_key
+
+
+def test_apply_resolved_with_list_value():
+    """Verify that resolved value can be a list."""
+    data = {"nodes": {NODE_1: {"tags": {"$type": "tags", "$id": REQ_1}}}}
+    tags = ["tag1", "tag2", "tag3"]
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: tags})
+
+    assert data["nodes"][NODE_1]["tags"] == tags
+
+
+def test_apply_resolved_with_integer_value():
+    """Verify that resolved value can be an integer."""
+    data = {"nodes": {NODE_1: {"max_tokens": {"$type": "config", "$id": REQ_1}}}}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: 4096})
+
+    assert data["nodes"][NODE_1]["max_tokens"] == 4096
+
+
+def test_apply_resolved_with_boolean_value():
+    """Verify that resolved value can be a boolean."""
+    data = {"nodes": {NODE_1: {"stream": {"$type": "config", "$id": REQ_1}}}}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: True})
+
+    assert data["nodes"][NODE_1]["stream"] is True
+
+
+def test_apply_resolved_with_none_value():
+    """Verify that resolved value can be None."""
+    data = {"nodes": {NODE_1: {"optional_field": {"$type": "config", "$id": REQ_1}}}}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: None})
+
+    assert data["nodes"][NODE_1]["optional_field"] is None
+
+
+def test_apply_resolved_in_list_with_string_value():
+    """Verify that requirements inside lists can be resolved to strings."""
+    data = {"items": [{"$type": "item", "$id": REQ_1}, {"$type": "item", "$id": REQ_2}]}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: "first", REQ_2: "second"})
+
+    assert data["items"] == ["first", "second"]
+
+
+def test_apply_resolved_in_list_raises_on_missing():
+    """Verify that missing requirement in list raises exception."""
+    data = {"items": [{"$type": "item", "$id": REQ_MISSING}]}
+
+    with pytest.raises(WorkflowYAMLLoaderException) as exc_info:
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {})
+
+    assert REQ_MISSING in str(exc_info.value)
+
+
+def test_requirement_data_with_value_path():
+    """Verify RequirementData captures value_path when present."""
+    req = RequirementData.model_validate({"$type": "requirement", "$id": REQ_1, "value_path": VP_ACCOUNT_ID})
+
+    assert req.type == "requirement"
+    assert req.id == REQ_1
+    assert req.value_path == VP_ACCOUNT_ID
+
+
+def test_requirement_data_without_value_path():
+    """Verify RequirementData defaults value_path to None when absent."""
+    req = RequirementData.model_validate({"$type": "connection", "$id": REQ_1})
+
+    assert req.value_path is None
+
+
+def test_get_requirements_extracts_value_path():
+    """Verify get_requirements captures value_path from requirement dicts."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "external_user_id": {"$type": "requirement", "$id": REQ_1, "value_path": VP_EXTERNAL_USER_ID},
+            }
+        }
+    }
+    requirements = WorkflowYAMLLoader.get_requirements(data)
+
+    assert len(requirements) == 1
+    assert requirements[0].id == REQ_1
+    assert requirements[0].value_path == VP_EXTERNAL_USER_ID
+
+
+def test_apply_resolved_with_value_path_extracts_field():
+    """Verify value_path extracts a specific field from the resolved dict."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "external_user_id": {"$type": "requirement", "$id": REQ_1, "value_path": VP_EXTERNAL_USER_ID},
+            }
+        }
+    }
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: RESOLVED_USER_REQUIREMENT})
+
+    assert data["nodes"][NODE_1]["external_user_id"] == EXTERNAL_USER_ID
+
+
+def test_apply_resolved_with_value_path_nested_field():
+    """Verify value_path works with nested JSON paths."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "token": {"$type": "requirement", "$id": REQ_1, "value_path": VP_CREDENTIALS_TOKEN},
+            }
+        }
+    }
+    resolved_value = {"credentials": {"token": SECRET_TOKEN, "refresh_token": REFRESH_TOKEN}}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_value})
+
+    assert data["nodes"][NODE_1]["token"] == SECRET_TOKEN
+
+
+def test_apply_resolved_same_id_different_value_paths():
+    """Verify same $id with different value_paths extracts different values."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "external_user_id": {"$type": "requirement", "$id": REQ_1, "value_path": VP_EXTERNAL_USER_ID},
+                "configurable_props": {
+                    "auth_provision_id": {"$type": "requirement", "$id": REQ_1, "value_path": VP_ACCOUNT_ID},
+                },
+            }
+        }
+    }
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: RESOLVED_USER_REQUIREMENT})
+
+    assert data["nodes"][NODE_1]["external_user_id"] == EXTERNAL_USER_ID
+    assert data["nodes"][NODE_1]["configurable_props"]["auth_provision_id"] == ACCOUNT_ID
+
+
+def test_apply_resolved_value_path_no_match_raises():
+    """Verify value_path that doesn't match raises exception."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "field": {"$type": "requirement", "$id": REQ_1, "value_path": "$.nonexistent"},
+            }
+        }
+    }
+
+    with pytest.raises(WorkflowYAMLLoaderException, match="value_path"):
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: {"other_field": "value"}})
+
+
+def test_apply_resolved_value_path_on_non_dict_raises():
+    """Verify value_path on a non-dict/list resolved value raises exception."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "field": {"$type": "requirement", "$id": REQ_1, "value_path": "$.key"},
+            }
+        }
+    }
+
+    with pytest.raises(WorkflowYAMLLoaderException, match="must be a dict or list"):
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: "plain-string"})
+
+
+def test_apply_resolved_value_path_multiple_matches_raises():
+    """Verify value_path that matches multiple values raises exception."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "field": {"$type": "requirement", "$id": REQ_1, "value_path": "$.items[*].id"},
+            }
+        }
+    }
+    resolved_value = {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]}
+
+    with pytest.raises(WorkflowYAMLLoaderException, match="matched multiple values"):
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_value})
+
+
+def test_apply_resolved_value_path_in_list():
+    """Verify value_path works for requirements inside lists."""
+    data = {"items": [{"$type": "requirement", "$id": REQ_1, "value_path": "$.name"}]}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: {"name": EXTRACTED_NAME, "age": 30}})
+
+    assert data["items"] == [EXTRACTED_NAME]
+
+
+def test_apply_resolved_value_path_single_match_list_value():
+    """Verify value_path correctly returns a list value from a single JSONPath match.
+
+    Regression: previously isinstance(result, list) was used to detect multiple matches,
+    which conflated a single match whose value is a list with multiple matches.
+    """
+    data = {
+        "nodes": {
+            NODE_1: {
+                "tags": {"$type": "requirement", "$id": REQ_1, "value_path": "$.tags"},
+            }
+        }
+    }
+    resolved_value = {"tags": ["alpha", "beta", "gamma"], "name": "test"}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_value})
+
+    assert data["nodes"][NODE_1]["tags"] == ["alpha", "beta", "gamma"]
+
+
+def test_apply_resolved_value_path_single_match_none_value():
+    """Verify value_path correctly returns None from a single JSONPath match.
+
+    Regression: previously `result is None` was used to detect no matches,
+    which conflated a single match whose value is None with no match found.
+    """
+    data = {
+        "nodes": {
+            NODE_1: {
+                "optional_field": {"$type": "requirement", "$id": REQ_1, "value_path": "$.optional_field"},
+            }
+        }
+    }
+    resolved_value = {"optional_field": None, "name": "test"}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_value})
+
+    assert data["nodes"][NODE_1]["optional_field"] is None
+
+
+def test_apply_resolved_mixed_with_and_without_value_path():
+    """Verify requirements with and without value_path coexist correctly."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "connection": {"$type": "connection", "$id": REQ_1},
+                "user_id": {"$type": "requirement", "$id": REQ_2, "value_path": VP_EXTERNAL_USER_ID},
+            }
+        }
+    }
+    resolved_connection = {"type": OPENAI_CONN, "api_key": API_KEY, "id": CONN_ID_RESOLVED}
+
+    WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: resolved_connection, REQ_2: RESOLVED_USER_REQUIREMENT})
+
+    assert data["nodes"][NODE_1]["connection"] == resolved_connection
+    assert data["nodes"][NODE_1]["user_id"] == EXTERNAL_USER_ID
+
+
+def test_apply_resolved_value_path_invalid_jsonpath_raises():
+    """Verify invalid JSONPath in value_path raises WorkflowYAMLLoaderException, not ValueError."""
+    data = {
+        "nodes": {
+            NODE_1: {
+                "field": {"$type": "requirement", "$id": REQ_1, "value_path": "$[invalid jsonpath"},
+            }
+        }
+    }
+
+    with pytest.raises(WorkflowYAMLLoaderException, match="Invalid value_path"):
+        WorkflowYAMLLoader.apply_resolved_requirements(data, {REQ_1: {"key": "value"}})
+
+
+def test_nested_inline_node_with_inline_dict_connection():
+    """Verify inline dict connection on a nested inline node resolves correctly."""
+    data = {
+        "connections": {},
+        "nodes": {
+            AGENT_ID: {
+                "type": AGENT_NODE,
+                "llm": {
+                    "id": LLM_ID,
+                    "type": OPENAI_NODE,
+                    "connection": {"type": OPENAI_CONN, "api_key": API_KEY},
+                    "model": MODEL_GPT,
+                },
+            }
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+    result = WorkflowYAMLLoader.parse(data, init_components=False)
+
+    assert AGENT_ID in result.nodes
+    agent = result.nodes[AGENT_ID]
+    assert agent.llm.connection.api_key == API_KEY
+
+
+def test_nested_inline_node_with_string_ref_connection():
+    """Verify string reference connection inside an inline LLM node resolves correctly."""
+    data = {
+        "connections": {CONN_1: {"type": OPENAI_CONN, "api_key": API_KEY}},
+        "nodes": {
+            AGENT_ID: {
+                "type": AGENT_NODE,
+                "llm": {
+                    "id": LLM_ID,
+                    "type": OPENAI_NODE,
+                    "connection": CONN_1,
+                    "model": MODEL_GPT,
+                },
+            }
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+    result = WorkflowYAMLLoader.parse(data, init_components=False)
+
+    assert AGENT_ID in result.nodes
+    agent = result.nodes[AGENT_ID]
+    assert agent.llm.connection.id == CONN_1
+    assert CONN_1 in result.connections
+
+
+def test_nested_inline_node_inline_dict_and_string_ref_connections_together():
+    """Verify two agents — one using inline dict connection, one using string ref — both parse correctly."""
+    data = {
+        "connections": {CONN_2: {"type": OPENAI_CONN, "api_key": "other-api-key"}},
+        "nodes": {
+            AGENT_ID: {
+                "type": AGENT_NODE,
+                "llm": {
+                    "id": LLM_ID,
+                    "type": OPENAI_NODE,
+                    "connection": {"type": OPENAI_CONN, "api_key": API_KEY},
+                    "model": MODEL_GPT,
+                },
+            },
+            AGENT_ID_2: {
+                "type": AGENT_NODE,
+                "llm": {
+                    "id": LLM_ID_2,
+                    "type": OPENAI_NODE,
+                    "connection": CONN_2,
+                    "model": MODEL_GPT,
+                },
+            },
+        },
+        "flows": {},
+        "workflows": {},
+    }
+
+    result = WorkflowYAMLLoader.parse(data, init_components=False)
+
+    assert AGENT_ID in result.nodes
+    assert AGENT_ID_2 in result.nodes
+    assert result.nodes[AGENT_ID].llm.connection.api_key == API_KEY
+    assert result.nodes[AGENT_ID_2].llm.connection.id == CONN_2
+    assert result.nodes[AGENT_ID_2].llm.connection.api_key == "other-api-key"
