@@ -25,10 +25,14 @@ export default function WorkflowDetailPage() {
     void load(id);
   }, [id, load]);
 
-  const serverDefinition = useMemo(
-    () => draftDefinitionFromDetail(current),
-    [current],
-  );
+  // Only derive a definition once the LOADED workflow actually matches this
+  // route's id. Otherwise a stale ``currentWorkflow`` (left over from a
+  // different workflow opened moments earlier) would seed this editor with the
+  // wrong graph — and a Save would then overwrite this workflow with it.
+  const serverDefinition = useMemo(() => {
+    if (!current || String(current.workflow.id) !== String(id)) return null;
+    return draftDefinitionFromDetail(current);
+  }, [current, id]);
 
   // One editor store per workflow id, created the first time the definition
   // loads and kept across server refreshes so in-progress edits survive.
