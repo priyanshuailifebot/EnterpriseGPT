@@ -954,6 +954,45 @@ class NodeSummaryResponse(BaseModel):
     )
 
 
+class WorkflowRequirementsRequest(BaseModel):
+    """Body for evaluating which integrations a (possibly unsaved) graph needs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition: WorkflowDefinition
+
+
+class WorkflowRequirement(BaseModel):
+    """One integration the workflow depends on, with live connection status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    name: str
+    kind: str = Field(description='"action" | "tool" | "llm" | "saas".')
+    auth_type: str | None = None
+    connectable: bool = Field(
+        description="True when the platform can connect this provider inline."
+    )
+    required: bool = Field(description="True when it must be connected to publish.")
+    connected: bool
+    used_by: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class WorkflowRequirementsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requirements: list[WorkflowRequirement] = Field(default_factory=list)
+    missing_required: list[str] = Field(
+        default_factory=list,
+        description="Provider ids that are required, connectable, and not yet connected.",
+    )
+    publishable: bool = Field(
+        description="True when no required integration is missing."
+    )
+
+
 class WorkflowCreateBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1161,6 +1200,9 @@ __all__ = [
     "WorkflowDefinition",
     "WorkflowDetailOut",
     "WorkflowListOut",
+    "WorkflowRequirement",
+    "WorkflowRequirementsRequest",
+    "WorkflowRequirementsResponse",
     "WorkflowSummaryOut",
     "WorkflowUpdateBody",
     "WorkflowVersionOut",

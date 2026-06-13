@@ -39,6 +39,8 @@ from schemas.workflow import (
     WorkflowCreateBody,
     WorkflowDetailOut,
     WorkflowListOut,
+    WorkflowRequirementsRequest,
+    WorkflowRequirementsResponse,
     WorkflowSummaryOut,
     WorkflowUpdateBody,
     WorkflowVersionOut,
@@ -351,6 +353,37 @@ async def summarize_node_route(
         definition=body.definition,
     )
     return NodeSummaryResponse(summary=summary, cached=cached)
+
+
+@router.post(
+    "/{workflow_id}/requirements",
+    dependencies=[require_permission(Permission.WORKFLOW_READ)],
+    response_model=WorkflowRequirementsResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def workflow_requirements_route(
+    workflow_id: UUID,
+    body: WorkflowRequirementsRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowRequirementsResponse:
+    """List the external integrations this workflow needs + their live status.
+
+    Evaluates the definition in the body (so the editor can include unsaved
+    edits). The same evaluation backs the server-side publish gate.
+    """
+    requirements, missing = await service.workflow_requirements(
+        db,
+        user=user,
+        workflow_id=workflow_id,
+        definition=body.definition,
+    )
+    return WorkflowRequirementsResponse(
+        requirements=requirements,
+        missing_required=missing,
+        publishable=len(missing) == 0,
+    )
 
 
 @router.delete(

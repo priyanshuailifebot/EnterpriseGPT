@@ -32,6 +32,7 @@ from models.workflow_execution_step import (
     WorkflowExecutionStepStatus,
 )
 from models.workflow_version import WorkflowVersion
+from models.native_connection import NativeConnection, NativeConnectionStatus
 from models.workspace_member import WorkspaceMember
 from schemas.workflow import (
     InterpretRequest,
@@ -39,9 +40,11 @@ from schemas.workflow import (
     ReadyResponse,
     WorkflowCreateBody,
     WorkflowDefinition,
+    WorkflowRequirement,
     WorkflowUpdateBody,
     slugify_name,
 )
+from services.workflow_requirements import derive_requirements
 from services.clarification_service import (
     ClarificationAccessDeniedError,
     ClarificationReady,
@@ -479,6 +482,77 @@ class WorkflowService:
             log.debug("workflow.node_summary.cache_write_failed", exc_info=True)
         return summary, False
 
+    async def _evaluate_requirements(
+        self,
+        db: AsyncSession,
+        *,
+        workspace_id: UUID,
+        definition: WorkflowDefinition,
+    ) -> tuple[list[WorkflowRequirement], list[str]]:
+        """Return ``(requirements, missing_required)`` for a definition.
+
+        Shared by the requirements endpoint (panel) and the publish gate so
+        there's exactly one notion of "what does this workflow need".
+        """
+        specs = derive_requirements(definition)
+
+        active_rows = await db.execute(
+            select(NativeConnection.provider).where(
+                NativeConnection.workspace_id == workspace_id,
+                NativeConnection.status == NativeConnectionStatus.ACTIVE,
+            )
+        )
+        active = {p.strip().lower() for (p,) in active_rows.all()}
+
+        # Composio is configured at the platform level (hosted MCP), so treat
+        # its meta-tools as available when credentials are present.
+        composio_ready = bool(
+            self.settings.COMPOSIO_MCP_API_KEY or self.settings.COMPOSIO_API_KEY
+        )
+
+        requirements: list[WorkflowRequirement] = []
+        missing_required: list[str] = []
+        for s in specs:
+            connected = composio_ready if s.provider == "composio" else s.provider in active
+            if s.required and s.connectable and not connected:
+                missing_required.append(s.provider)
+            requirements.append(
+                WorkflowRequirement(
+                    provider=s.provider,
+                    name=s.name,
+                    kind=s.kind,
+                    auth_type=s.auth_type,
+                    connectable=s.connectable,
+                    required=s.required,
+                    connected=connected,
+                    used_by=s.used_by,
+                    reason=s.reason,
+                )
+            )
+        return requirements, missing_required
+
+    async def workflow_requirements(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        workflow_id: UUID,
+        definition: WorkflowDefinition,
+    ) -> tuple[list[WorkflowRequirement], list[str]]:
+        """RBAC-checked requirements for a (possibly unsaved) definition."""
+        from fastapi import HTTPException, status
+
+        row = await self._fetch_workflow_for_user(
+            db, user_id=user.id, workflow_id=workflow_id
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found"
+            )
+        return await self._evaluate_requirements(
+            db, workspace_id=row.workspace_id, definition=definition
+        )
+
     async def create_workflow(
         self,
         db: AsyncSession,
@@ -623,6 +697,24 @@ class WorkflowService:
                     "publishing."
                 ),
             )
+
+        # Gate: every required, connectable integration must be connected.
+        try:
+            definition = WorkflowDefinition.model_validate(latest_ver.definition)
+        except Exception:  # noqa: BLE001 — malformed stored definition
+            definition = None
+        if definition is not None:
+            _, missing = await self._evaluate_requirements(
+                db, workspace_id=row.workspace_id, definition=definition
+            )
+            if missing:
+                raise HTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Connect required integrations before publishing: "
+                        + ", ".join(missing)
+                    ),
+                )
 
         row.status = WorkflowStatus.PUBLISHED
         row.published_at = _utcnow()

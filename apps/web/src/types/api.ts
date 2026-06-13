@@ -354,6 +354,24 @@ export interface NodeSummaryResponse {
   cached: boolean;
 }
 
+export interface WorkflowRequirement {
+  provider: string;
+  name: string;
+  kind: string; // "action" | "tool" | "llm" | "saas"
+  auth_type: string | null;
+  connectable: boolean;
+  required: boolean;
+  connected: boolean;
+  used_by: string[];
+  reason: string;
+}
+
+export interface WorkflowRequirementsResponse {
+  requirements: WorkflowRequirement[];
+  missing_required: string[];
+  publishable: boolean;
+}
+
 export type ExecutionEventType =
   | "workflow_start"
   | "agent_start"

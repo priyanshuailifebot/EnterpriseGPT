@@ -40,7 +40,7 @@ import {
   ReactFlowProvider,
   useReactFlow,
 } from "@xyflow/react";
-import { PlayCircle, Redo2, Rocket, Save, Undo2, Wand2 } from "lucide-react";
+import { Plug, PlayCircle, Redo2, Rocket, Save, Undo2, Wand2 } from "lucide-react";
 import {
   type DragEvent,
   type KeyboardEvent,
@@ -68,6 +68,7 @@ import type {
 import { NodeInspectDrawer } from "./NodeInspectDrawer";
 import { NodePalette, PALETTE_DRAG_MIME } from "./NodePalette";
 import { PropertyInspector } from "./PropertyInspector";
+import { RequiredIntegrationsPanel } from "./RequiredIntegrationsPanel";
 import { TestRunPanel } from "./TestRunPanel";
 import { WorkflowChatPanel, type ChatSubmitResult } from "./WorkflowChatPanel";
 import { type ExecutionRunState } from "./execution-status";
@@ -163,6 +164,7 @@ function CanvasInner({
   // of the editable store definition.
   // ----------------------------------------------------------------------
   const [chatOpen, setChatOpen] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [preview, setPreview] = useState<
     { proposed: WorkflowDefinition; diff: NodeDiff } | null
   >(null);
@@ -482,6 +484,12 @@ function CanvasInner({
         (err as { response?: { data?: { detail?: string } } })?.response?.data
           ?.detail ?? "Publish failed — run a successful test first.";
       toast.error(detail);
+      // If publish was blocked on missing integrations, open the panel so the
+      // user can connect them right there.
+      if (/integration/i.test(detail)) {
+        setChatOpen(false);
+        setIntegrationsOpen(true);
+      }
     } finally {
       setPublishing(false);
     }
@@ -570,7 +578,14 @@ function CanvasInner({
           onSave={() => void handleSave()}
           onUndo={undo}
           onRedo={redo}
-          onOpenRefine={() => setChatOpen((o) => !o)}
+          onOpenRefine={() => {
+            setIntegrationsOpen(false);
+            setChatOpen((o) => !o);
+          }}
+          onOpenIntegrations={() => {
+            setChatOpen(false);
+            setIntegrationsOpen((o) => !o);
+          }}
           onOpenTestRun={() => setTestPanelOpen(true)}
         />
         <div
@@ -660,6 +675,14 @@ function CanvasInner({
         onReject={rejectPreview}
       />
 
+      <RequiredIntegrationsPanel
+        open={integrationsOpen}
+        onClose={() => setIntegrationsOpen(false)}
+        workflowId={workflowId}
+        workspaceId={workspaceId}
+        definition={definition}
+      />
+
       <TestRunPanel
         open={testPanelOpen}
         onClose={() => setTestPanelOpen(false)}
@@ -713,6 +736,7 @@ function Toolbar({
   onUndo,
   onRedo,
   onOpenRefine,
+  onOpenIntegrations,
   onOpenTestRun,
 }: {
   isDirty: boolean;
@@ -730,6 +754,7 @@ function Toolbar({
   onUndo: () => void;
   onRedo: () => void;
   onOpenRefine: () => void;
+  onOpenIntegrations: () => void;
   onOpenTestRun: () => void;
 }) {
   const isPublished = status === "published";
@@ -796,6 +821,20 @@ function Toolbar({
         <PlayCircle className="h-4 w-4" />
         <span className="text-[12px] font-semibold">Test</span>
       </button>
+      {canTestRun ? (
+        <button
+          type="button"
+          onClick={onOpenIntegrations}
+          className={cn(
+            toolButtonClasses,
+            "flex items-center gap-1 text-slate-700 dark:text-slate-300",
+          )}
+          title="Integrations this workflow needs to publish & run"
+        >
+          <Plug className="h-4 w-4" />
+          <span className="text-[12px] font-semibold">Integrations</span>
+        </button>
+      ) : null}
       {showAugment ? (
         <button
           type="button"
