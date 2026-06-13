@@ -28,7 +28,6 @@ import "@xyflow/react/dist/style.css";
 import {
   addEdge,
   applyEdgeChanges,
-  applyNodeChanges,
   Background,
   type Connection,
   Controls,
@@ -38,6 +37,7 @@ import {
   type NodeChange,
   ReactFlow,
   ReactFlowProvider,
+  useNodesState,
   useReactFlow,
 } from "@xyflow/react";
 import { Plug, PlayCircle, Redo2, Rocket, Save, Undo2, Wand2 } from "lucide-react";
@@ -249,6 +249,12 @@ function CanvasInner({
           id: n.id,
           type: flowTypeForKind(n.data.kind),
           position: xy,
+          // Seed dimensions so RF renders the node immediately instead of
+          // keeping it ``visibility:hidden`` until its ResizeObserver fires
+          // (which can lag seconds on a heavy cold load). RF corrects to the
+          // real measured size on the next frame.
+          initialWidth: 240,
+          initialHeight: 96,
           data: toFlowNodeData(raw, activeDefinition, undefined),
           selected: false,
           className: diffClassName(n.id, preview.diff),
@@ -268,6 +274,9 @@ function CanvasInner({
         id: n.id,
         type: flowTypeForKind(n.data.kind),
         position: xy,
+        // See note above — seed dimensions so the node is visible immediately.
+        initialWidth: 240,
+        initialHeight: 96,
         data: toFlowNodeData(raw, activeDefinition, runStatus),
         selected: n.id === selectedId,
         className: runStatus
@@ -288,6 +297,46 @@ function CanvasInner({
     connectedProviders,
   ]);
 
+  // React Flow keeps a node ``visibility:hidden`` until it has *measured* it,
+  // and persists that measurement in its OWN node state. So we let RF own the
+  // node array (``useNodesState``) and sync our derived view into it only when
+  // the node *set/content* changes — keyed by a signature that excludes
+  // geometry so dragging doesn't trigger a resync (which would fight the drag).
+  // This is the same pattern the read-only ``VisualEditor`` uses, and is what
+  // makes measured nodes actually appear.
+  const [rfNodes, setRfNodes, onNodesChangeBase] = useNodesState<Node>([]);
+  const nodesSignature = useMemo(
+    () =>
+      nodesView
+        .map(
+          (n) =>
+            `${n.id}|${n.type}|${n.className ?? ""}|${n.selected ? 1 : 0}|${JSON.stringify(n.data)}`,
+        )
+        .join("§"),
+    [nodesView],
+  );
+  useEffect(() => {
+    setRfNodes(nodesView);
+    // Intentionally keyed on the structural signature, not ``nodesView`` (whose
+    // identity changes on every drag via the positions map).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodesSignature, setRfNodes]);
+
+  // Re-fit once the node set is present (after the initial-dimension render
+  // below, RF has bounds to fit to).
+  const nodeIdsKey = useMemo(() => nodesView.map((n) => n.id).join(","), [nodesView]);
+  useEffect(() => {
+    if (nodeIdsKey === "") return;
+    const t = window.setTimeout(() => {
+      try {
+        reactFlow.fitView({ padding: 0.2 });
+      } catch {
+        /* viewport not ready yet; the dedicated fitView effect covers it */
+      }
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [nodeIdsKey, reactFlow]);
+
   const edgesView = useMemo(() => {
     const { edges } = workflowToFlowGraph(activeDefinition);
     return edges.map((e) => ({
@@ -304,15 +353,19 @@ function CanvasInner({
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      // Let React Flow apply ALL changes into its own node state first — this
+      // is what persists ``measured`` dimensions so nodes leave the
+      // ``visibility:hidden`` state and actually render.
+      onNodesChangeBase(changes);
       // Editing is frozen while reviewing an AI proposal.
       if (preview) return;
-      // Apply React Flow's local position changes (dragging) into our
-      // positions map. Selection changes funnel back into the store.
-      const next = applyNodeChanges(changes, nodesView);
       const newPositions = { ...positions };
-      for (const n of next) newPositions[n.id] = n.position;
-      setPositions(newPositions);
+      let posChanged = false;
       for (const ch of changes) {
+        if (ch.type === "position" && ch.position) {
+          newPositions[ch.id] = ch.position;
+          posChanged = true;
+        }
         if (ch.type === "select") {
           // If the selected node has test-run data, open the inspect drawer
           // (read-only view of its input/output) instead of the editor form.
@@ -327,8 +380,16 @@ function CanvasInner({
           removeNodeAction(ch.id);
         }
       }
+      if (posChanged) setPositions(newPositions);
     },
-    [nodesView, positions, selectNode, removeNodeAction, executionState, preview],
+    [
+      onNodesChangeBase,
+      positions,
+      selectNode,
+      removeNodeAction,
+      executionState,
+      preview,
+    ],
   );
 
   const onEdgesChange = useCallback(
@@ -595,7 +656,7 @@ function CanvasInner({
           className="reactflow-themed relative h-[calc(100vh-220px)] min-h-[720px] w-full rounded-2xl border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-950"
         >
           <ReactFlow
-            nodes={nodesView}
+            nodes={rfNodes}
             edges={edgesView}
             nodeTypes={AGENT_FLOW_NODE_TYPES}
             edgeTypes={BRANCH_EDGE_TYPES}
