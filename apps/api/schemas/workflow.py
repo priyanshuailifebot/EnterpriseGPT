@@ -1015,6 +1015,14 @@ class WorkflowUpdateBody(BaseModel):
     change_note: str | None = Field(None, max_length=2000)
 
 
+class WorkflowRenameBody(BaseModel):
+    """Name-only rename — does NOT create a version or change publish state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+
+
 ExecutionEventType = Literal[
     "workflow_start",
     "agent_start",
@@ -1200,6 +1208,7 @@ __all__ = [
     "WorkflowDefinition",
     "WorkflowDetailOut",
     "WorkflowListOut",
+    "WorkflowRenameBody",
     "WorkflowRequirement",
     "WorkflowRequirementsRequest",
     "WorkflowRequirementsResponse",

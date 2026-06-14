@@ -31,6 +31,7 @@ type WorkflowStore = {
   fetchWorkflowDetail: (id: string) => Promise<void>;
   createWorkflow: (body: WorkflowCreateBody) => Promise<WorkflowSummaryOut>;
   updateWorkflow: (id: string, body: WorkflowUpdateBody) => Promise<WorkflowSummaryOut>;
+  renameWorkflow: (id: string, name: string) => Promise<WorkflowSummaryOut>;
   publishWorkflow: (id: string) => Promise<WorkflowSummaryOut>;
   unpublishWorkflow: (id: string) => Promise<WorkflowSummaryOut>;
   setCurrentWorkflow: (d: WorkflowDetailOut | null) => void;
@@ -103,6 +104,37 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
           }
         : s.currentWorkflow,
     }));
+    return data;
+  },
+
+  async renameWorkflow(id, name) {
+    const { data } = await api.patch<WorkflowSummaryOut>(
+      `/api/v1/workflows/${id}`,
+      { name },
+    );
+    set((s) => {
+      const cur = s.currentWorkflow;
+      const sameWf = cur?.workflow.id === id;
+      const latestVer = sameWf
+        ? Math.max(...cur!.versions.map((v) => v.version), 0)
+        : 0;
+      return {
+        workflows: s.workflows.map((w) => (w.id === id ? data : w)),
+        currentWorkflow: sameWf
+          ? {
+              ...cur!,
+              workflow: data,
+              // keep the latest version's definition name in sync so the editor
+              // re-seeds with the new name (rename creates no new version).
+              versions: cur!.versions.map((v) =>
+                v.version === latestVer
+                  ? { ...v, definition: { ...v.definition, name } }
+                  : v,
+              ),
+            }
+          : cur,
+      };
+    });
     return data;
   },
 

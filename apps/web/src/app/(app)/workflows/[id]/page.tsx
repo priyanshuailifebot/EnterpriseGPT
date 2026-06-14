@@ -137,10 +137,10 @@ export default function WorkflowDetailPage() {
 }
 
 /**
- * Inline-editable workflow title. Renaming patches the editor store's
- * ``definition.name`` and persists immediately via ``updateWorkflow`` (the
- * backend syncs the workflow's name from the saved definition — there's no
- * dedicated rename endpoint, so this saves a new version like any edit).
+ * Inline-editable workflow title. Renaming hits the lightweight
+ * ``PATCH /workflows/{id}`` (name only) — it does NOT create a new version or
+ * change publish state — then syncs the editor store's ``definition.name`` in
+ * place (without marking the canvas dirty).
  */
 function EditableTitle({
   store,
@@ -150,9 +150,8 @@ function EditableTitle({
   workflowId: string;
 }) {
   const name = useStore(store, (s) => s.definition.name);
-  const patchMeta = useStore(store, (s) => s.patchMeta);
-  const markSaved = useStore(store, (s) => s.markSaved);
-  const updateWorkflow = useWorkflowStore((s) => s.updateWorkflow);
+  const renameInPlace = useStore(store, (s) => s.renameInPlace);
+  const renameWorkflow = useWorkflowStore((s) => s.renameWorkflow);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
@@ -169,21 +168,19 @@ function EditableTitle({
       setEditing(false);
       return;
     }
-    // Patch the working definition, then persist the full (patched) definition.
-    patchMeta({ name: next });
     setEditing(false);
     setSaving(true);
     try {
-      const definition = { ...store.getState().definition, name: next };
-      await updateWorkflow(workflowId, { definition });
-      markSaved();
+      await renameWorkflow(workflowId, next);
+      renameInPlace(next); // keep the editor store in sync (no dirty flag)
       toast.success("Workflow renamed");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Rename failed");
+      setDraft(name);
     } finally {
       setSaving(false);
     }
-  }, [draft, name, patchMeta, store, updateWorkflow, workflowId, markSaved]);
+  }, [draft, name, renameInPlace, renameWorkflow, workflowId]);
 
   if (!editing) {
     return (

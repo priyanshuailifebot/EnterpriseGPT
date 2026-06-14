@@ -643,6 +643,48 @@ class WorkflowService:
         await db.refresh(row)
         return row
 
+    async def rename_workflow(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        workflow_id: UUID,
+        name: str,
+    ) -> WFRow:
+        """Rename a workflow WITHOUT creating a version or touching publish state.
+
+        Updates ``workflows.name`` and the latest version's ``definition.name``
+        in place so the library, editor, and runtime all agree on the new name.
+        """
+        from fastapi import HTTPException, status
+
+        clean = name.strip()
+        if not clean:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="name cannot be empty",
+            )
+        row = await self._fetch_workflow_for_user(db, user_id=user.id, workflow_id=workflow_id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+
+        row.name = clean
+        latest = (
+            await db.execute(
+                select(WorkflowVersion)
+                .where(WorkflowVersion.workflow_id == row.id)
+                .order_by(WorkflowVersion.version.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest is not None:
+            # Reassign (not in-place mutate) so SQLAlchemy flags the JSONB dirty.
+            latest.definition = {**latest.definition, "name": clean}
+            db.add(latest)
+        await db.commit()
+        await db.refresh(row)
+        return row
+
     async def publish_workflow(
         self,
         db: AsyncSession,

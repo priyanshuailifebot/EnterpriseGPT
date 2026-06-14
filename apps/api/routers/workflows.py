@@ -39,6 +39,7 @@ from schemas.workflow import (
     WorkflowCreateBody,
     WorkflowDetailOut,
     WorkflowListOut,
+    WorkflowRenameBody,
     WorkflowRequirementsRequest,
     WorkflowRequirementsResponse,
     WorkflowSummaryOut,
@@ -236,6 +237,25 @@ async def update_workflow_route(
     service: WorkflowService = Depends(get_workflow_service),
 ) -> WorkflowSummaryOut:
     row = await service.update_workflow(db, user=user, workflow_id=workflow_id, body=body)
+    return WorkflowSummaryOut.model_validate(row)
+
+
+@router.patch(
+    "/{workflow_id}",
+    dependencies=[require_permission(Permission.WORKFLOW_CREATE)],
+    response_model=WorkflowSummaryOut,
+)
+async def rename_workflow_route(
+    workflow_id: UUID,
+    body: WorkflowRenameBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowSummaryOut:
+    """Rename only — no new version, no publish-state change."""
+    row = await service.rename_workflow(
+        db, user=user, workflow_id=workflow_id, name=body.name
+    )
     return WorkflowSummaryOut.model_validate(row)
 
 

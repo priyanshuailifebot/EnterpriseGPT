@@ -65,6 +65,9 @@ export interface EditorActions {
     WorkflowDefinition,
     "name" | "description" | "trigger" | "output_format" | "human_checkpoints"
   >>) => void;
+  /** Update the definition's name WITHOUT marking dirty or pushing history —
+   *  used after a name-only rename that's already been persisted server-side. */
+  renameInPlace: (name: string) => void;
   undo: () => void;
   redo: () => void;
 }
@@ -150,6 +153,9 @@ export function createWorkflowEditorStore(initial: WorkflowDefinition) {
 
       patchMeta: (patch) =>
         mutate((d) => ({ ...d, ...patch })),
+
+      renameInPlace: (name) =>
+        set((s) => ({ definition: { ...s.definition, name } })),
 
       undo: () => {
         const { past, future, definition } = get();
