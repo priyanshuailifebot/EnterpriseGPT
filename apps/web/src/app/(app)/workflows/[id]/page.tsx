@@ -1,9 +1,11 @@
 "use client";
 
-import { MessageCircle } from "lucide-react";
+import { Check, MessageCircle, Pencil, X } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import toast from "react-hot-toast";
+import { useStore } from "zustand";
 
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { InteractiveCanvas } from "@/components/workflow/InteractiveCanvas";
@@ -70,7 +72,11 @@ export default function WorkflowDetailPage() {
     <div className="mx-auto w-full max-w-[1600px] space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">{current.workflow.name}</h1>
+          {store ? (
+            <EditableTitle store={store} workflowId={id} />
+          ) : (
+            <h1 className="text-2xl font-semibold">{current.workflow.name}</h1>
+          )}
           <p className="text-sm text-slate-600 dark:text-slate-400">
             Latest version #{current.workflow.current_version}
           </p>
@@ -126,6 +132,120 @@ export default function WorkflowDetailPage() {
           This workflow has no saved versions yet.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Inline-editable workflow title. Renaming patches the editor store's
+ * ``definition.name`` and persists immediately via ``updateWorkflow`` (the
+ * backend syncs the workflow's name from the saved definition — there's no
+ * dedicated rename endpoint, so this saves a new version like any edit).
+ */
+function EditableTitle({
+  store,
+  workflowId,
+}: {
+  store: EditorStore;
+  workflowId: string;
+}) {
+  const name = useStore(store, (s) => s.definition.name);
+  const patchMeta = useStore(store, (s) => s.patchMeta);
+  const markSaved = useStore(store, (s) => s.markSaved);
+  const updateWorkflow = useWorkflowStore((s) => s.updateWorkflow);
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraft(name);
+  }, [name]);
+
+  const commit = useCallback(async () => {
+    const next = draft.trim();
+    if (!next || next === name) {
+      setDraft(name);
+      setEditing(false);
+      return;
+    }
+    // Patch the working definition, then persist the full (patched) definition.
+    patchMeta({ name: next });
+    setEditing(false);
+    setSaving(true);
+    try {
+      const definition = { ...store.getState().definition, name: next };
+      await updateWorkflow(workflowId, { definition });
+      markSaved();
+      toast.success("Workflow renamed");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Rename failed");
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, name, patchMeta, store, updateWorkflow, workflowId, markSaved]);
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(name);
+          setEditing(true);
+        }}
+        className="group inline-flex items-center gap-2 rounded-lg text-left"
+        title="Rename workflow"
+      >
+        <h1 className="text-2xl font-semibold">{name}</h1>
+        {saving ? (
+          <span className="text-xs text-slate-400">saving…</span>
+        ) : (
+          <Pencil className="h-4 w-4 text-slate-400 opacity-0 transition group-hover:opacity-100" />
+        )}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void commit();
+          } else if (e.key === "Escape") {
+            setDraft(name);
+            setEditing(false);
+          }
+        }}
+        onBlur={() => void commit()}
+        maxLength={255}
+        className="w-[28rem] max-w-[70vw] rounded-md border border-brand-400 bg-white px-2 py-1 text-2xl font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500 dark:bg-slate-900 dark:text-slate-100"
+      />
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => void commit()}
+        className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+        title="Save name"
+      >
+        <Check className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => {
+          setDraft(name);
+          setEditing(false);
+        }}
+        className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+        title="Cancel"
+      >
+        <X className="h-4 w-4" />
+      </button>
     </div>
   );
 }
