@@ -120,7 +120,7 @@ export default function WorkflowRunPage() {
       }
     }
 
-    // Form trigger \u2014 collect typed fields.
+    // Form trigger — collect typed fields.
     if (trigger?.trigger_type === "form") {
       for (const f of trigger.form_fields) {
         if (!f.required) continue;
@@ -222,10 +222,10 @@ export default function WorkflowRunPage() {
     try {
       if (isPublished) {
         await unpublishWorkflow(workflowId);
-        toast.success("Reverted to draft \u2014 runs now preview.");
+        toast.success("Reverted to draft — runs now preview.");
       } else {
         await publishWorkflow(workflowId);
-        toast.success("Published \u2014 actions will run for real now.");
+        toast.success("Published — actions will run for real now.");
       }
       await fetchDetail(workflowId);
     } catch (e) {
@@ -303,7 +303,7 @@ export default function WorkflowRunPage() {
 
       {wfStatus && !isPublished ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
-          <p className="font-semibold">Draft mode \u2014 actions run in preview</p>
+          <p className="font-semibold">Draft mode — actions run in preview</p>
           <p className="mt-1 text-xs opacity-90">
             Side-effecting actions (send email, create ticket, etc.) won't fire
             for real until you publish the workflow. Agents still call the LLM so
