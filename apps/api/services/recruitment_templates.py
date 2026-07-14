@@ -264,21 +264,26 @@ HR_SCORING = WorkflowDefinition(
             trigger_type="webhook",
             slug=_SCORING_SLUG,
         ),
-        ActionNode(
-            id="get_transcript",
-            name="Get Interview Transcript",
-            depends_on=["start"],
-            provider="mcp",
-            action_slug="get_interview_transcript",
-            params={"call_id": "{{ start.call_id }}"},
-        ),
-        ActionNode(
+        # An LLM agent scores the interview transcript (which arrives on the
+        # trigger ctx from the Retell call-ended callback) and drafts a
+        # professional recruiter assessment in prose. Replaces the old voice-MCP
+        # scorer so it works with any transcript source and yields a real,
+        # presentable assessment instead of an unrendered score field.
+        AgentNode(
             id="score",
-            name="Score Interview",
-            depends_on=["get_transcript"],
-            provider="mcp",
-            action_slug="score_interview",
-            params={"call_id": "{{ start.call_id }}", "rubric": _RUBRIC},
+            name="Score & Draft",
+            depends_on=["start"],
+            role="You are an expert hiring assessor for a Field Sales Advisor role.",
+            instructions=(
+                "Your input is a JSON object with an interview `transcript` plus "
+                "candidate details (name, role_title). Write a concise, professional "
+                "hiring assessment of 4-6 sentences for the recruiter: the "
+                "candidate's fit for the role, key strengths, any gaps, an explicit "
+                "overall suitability rating out of 100, and a clear recommendation "
+                "(advance / hold / decline). Base everything strictly on the "
+                "transcript — do not invent facts. Write clean prose; you may use "
+                "simple HTML tags like <p> and <b>."
+            ),
         ),
         DataStoreNode(
             id="store_results",
@@ -290,9 +295,7 @@ HR_SCORING = WorkflowDefinition(
             payload={
                 "candidate_id": "{{ start.candidate_id }}",
                 "role_title": "{{ start.role_title }}",
-                "overall": "{{ score.data.overall }}",
-                "scores": "{{ score.data.scores }}",
-                "rationale": "{{ score.data.rationale }}",
+                "assessment": "{{ score }}",
                 "status": "scored",
             },
         ),
@@ -304,11 +307,15 @@ HR_SCORING = WorkflowDefinition(
             action_slug="gmail_send",
             params={
                 "to": "{{ start.email }}",
-                "subject": "Your interview summary",
+                "subject": "Thank you for interviewing — {{ start.role_title }}",
                 "html_body": (
-                    "<p>Thank you for interviewing, {{ start.name }}.</p>"
-                    "<p>Overall: {{ score.data.overall }}%</p>"
-                    "<p>{{ score.data.rationale }}</p>"
+                    '<div style="font-family:Arial,sans-serif;font-size:14px;'
+                    'color:#1a2233;line-height:1.6"><p>Hi {{ start.name }},</p>'
+                    "<p>Thank you for taking the time to interview for the "
+                    "<b>{{ start.role_title }}</b> role. We really enjoyed the "
+                    "conversation, and our team is reviewing it now — we'll follow "
+                    "up with next steps shortly.</p><p>Warm regards,<br>"
+                    "The Talent Team</p></div>"
                 ),
             },
         ),
@@ -352,13 +359,18 @@ HR_SCORING = WorkflowDefinition(
             action_slug="gmail_send",
             params={
                 "to": "recruiting@example.com",
-                "subject": "Review candidate — {{ start.role_title }} ({{ score.data.overall }}%)",
+                "subject": "Candidate review: {{ start.name }} — {{ start.role_title }}",
                 "html_body": (
-                    "<p>{{ start.name }} scored {{ score.data.overall }}%.</p>"
-                    "<p>{{ score.data.rationale }}</p>"
-                    "<p><a href=\"{{ sign_approve.data.url }}\">Approve → schedule HR round</a> "
-                    "&nbsp;|&nbsp; "
-                    "<a href=\"{{ sign_reject.data.url }}\">Reject</a></p>"
+                    '<div style="font-family:Arial,sans-serif;font-size:14px;'
+                    'color:#1a2233;line-height:1.6"><p><b>Candidate:</b> '
+                    "{{ start.name }} &nbsp;·&nbsp; <b>Role:</b> {{ start.role_title }}</p>"
+                    '<div style="background:#f5f7f3;border-left:3px solid #157f57;'
+                    'border-radius:6px;padding:12px 14px">{{ score }}</div>'
+                    '<p style="margin-top:18px"><a href="{{ sign_approve.data.url }}" '
+                    'style="background:#157f57;color:#fff;padding:9px 16px;'
+                    'border-radius:6px;text-decoration:none">Approve → schedule HR '
+                    'round</a> &nbsp; <a href="{{ sign_reject.data.url }}" '
+                    'style="color:#b45309">Reject</a></p></div>'
                 ),
             },
         ),

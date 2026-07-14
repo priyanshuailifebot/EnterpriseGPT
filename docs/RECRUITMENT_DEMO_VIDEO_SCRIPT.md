@@ -112,11 +112,17 @@ completing, or (b) narrate that the call ran and jump to the scored result. Then
 
 *(jump to the scored result / recruiter email)*
 
-> "When the call ends, the system fetches the transcript, scores it against that rubric, emails the
-> candidate a summary, and — importantly — sends **me**, the recruiter, the result with two buttons:
-> **Approve** or **Reject**."
+> "When the call ends, an **LLM scores the transcript** against that rubric and **drafts the emails
+> itself** — no canned templates. The candidate gets a warm, professional thank-you note, and **I**,
+> the recruiter, get the AI's written assessment — fit, strengths, gaps, an overall rating and a
+> recommendation — with two buttons: **Approve** or **Reject**."
 
-**Cut cue:** the recruiter email, Approve/Reject links prominent.
+**On screen:** open the recruiter email — show the AI-written assessment paragraph + the Approve/Reject buttons.
+
+**Cut cue:** the recruiter email, assessment + Approve/Reject links prominent.
+
+> **Note:** these emails send for real via native Gmail. For the demo everything is **self-addressed**
+> (candidate + recruiter both route to your own inbox via `+aliases`), so nothing reaches a real person.
 
 ---
 
@@ -184,7 +190,7 @@ approval condition to reference a field that doesn't exist.)* Click **Diagnose &
 
 | If you can't… | Do this instead (still looks real) |
 |---|---|
-| Place a real voice call (no Retell) | Narrate "the AI agent runs the call" over Scene 5, then trigger the scoring step with a canned transcript (Guide §5.2) so the scored result + recruiter email are genuine. |
+| Place a real voice call (no Retell) | Narrate "the AI agent runs the call" over Scene 5, then trigger the scoring step with a canned transcript (Guide §5.2). The **LLM scores that transcript for real** and drafts the assessment email — so the recruiter email is genuine even without live voice. |
 | Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1); the run and emails are real. |
 | Show scheduled jobs (Chaser/Ranking) | Skip — just mention them in Scene 2. They're background jobs and don't film well. |
 | Get self-heal to propose a fix | Make sure the defect is a **prompt** or **condition** flaw, not a missing integration (the healer intentionally won't auto-fix credential issues). |
