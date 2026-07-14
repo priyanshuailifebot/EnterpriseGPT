@@ -90,7 +90,7 @@ HR_SOURCING = WorkflowDefinition(
             provider="gmail",
             action_slug="gmail_send",
             params={
-                "to": "recruiting@company.com",
+                "to": "recruiting@example.com",
                 "subject": "Sourcing failed — {{ start.role_title }}",
                 "html_body": "<p>The ATS candidate search failed for {{ start.role_title }}.</p>",
             },
@@ -217,7 +217,7 @@ HR_INTERVIEW = WorkflowDefinition(
             provider="gmail",
             action_slug="gmail_send",
             params={
-                "to": "recruiting@company.com",
+                "to": "recruiting@example.com",
                 "subject": "Interview call failed to place",
                 "html_body": "<p>Could not start the interview for {{ start.candidate_id }}.</p>",
             },
@@ -351,7 +351,7 @@ HR_SCORING = WorkflowDefinition(
             provider="gmail",
             action_slug="gmail_send",
             params={
-                "to": "recruiting@company.com",
+                "to": "recruiting@example.com",
                 "subject": "Review candidate — {{ start.role_title }} ({{ score.data.overall }}%)",
                 "html_body": (
                     "<p>{{ start.name }} scored {{ score.data.overall }}%.</p>"
@@ -401,7 +401,7 @@ HR_DECISION = WorkflowDefinition(
             params={
                 "app": "google_calendar",
                 "action": "freebusy_query",
-                "calendars": ["hr-team@company.com"],
+                "calendars": ["hr-team@example.com"],
             },
         ),
         ActionNode(
@@ -411,7 +411,7 @@ HR_DECISION = WorkflowDefinition(
             provider="pipedream",
             action_slug="pipedream_calendly_create_event",
             params={
-                "calendar": "hr-team@company.com",
+                "calendar": "hr-team@example.com",
                 "attendees": ["{{ start.email }}"],
                 "start": "{{ check_hr.data.next_slot }}",
                 "duration_minutes": 30,
