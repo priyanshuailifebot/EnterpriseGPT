@@ -1171,6 +1171,23 @@ async def invoke_action(
             )
         raise ActionInvocationError(str(exc)) from exc
 
+    # Dynamiq HTTP nodes return an envelope {"content": <body>, "status_code": N}.
+    # Surface the API body as the node's `data` — so `$.data` matches both the
+    # connector contract and the demo-stub shape — and treat >=400 as a failure
+    # so on_error routing still fires.
+    if isinstance(result, dict) and "status_code" in result and "content" in result:
+        status_code = result.get("status_code")
+        if isinstance(status_code, int) and status_code >= 400:
+            if allow_dry_run:
+                return _dry_run(
+                    provider.id, action_slug, params, reason=f"http_{status_code}"
+                )
+            raise ActionInvocationError(
+                f"{provider.id}.{action_slug} HTTP {status_code}: "
+                f"{str(result.get('content'))[:200]}"
+            )
+        result = result["content"]
+
     out_native: dict[str, Any] = {
         "__provider__": provider.id,
         "__action__": action_slug,
@@ -1185,11 +1202,22 @@ async def invoke_action(
 def _run_tool(tool: Any, params: dict[str, Any]) -> Any:
     """Invoke a Dynamiq tool node uniformly.
 
-    ``HttpApiCall``, ``SQLExecutor``, etc. all expose ``.execute(input_data,
-    config=None)`` — call that with ``params`` as the input map.
+    Dynamiq nodes (``HttpApiCall``, ``SQLExecutor``, …) validate their input
+    schema in ``.run(input_data=...)`` and only then call ``.execute`` with a
+    validated model — so we must call ``.run``, never ``.execute`` directly
+    (``.execute`` assumes an already-parsed model and blows up on a raw dict).
+    ``.run`` returns a ``RunnableResult``; surface its ``.output`` and treat a
+    non-SUCCESS status as a failure so ``on_error`` handling kicks in.
     """
-    if hasattr(tool, "execute"):
-        return tool.execute(params)
+    if hasattr(tool, "run"):
+        res = tool.run(input_data=params)
+        status = getattr(res, "status", None)
+        if status is not None and getattr(status, "name", str(status)).upper() != "SUCCESS":
+            raise RuntimeError(
+                f"tool {getattr(tool, 'name', '?')} failed: "
+                f"{getattr(res, 'error', None) or getattr(res, 'output', None)}"
+            )
+        return getattr(res, "output", res)
     # Fall back to a direct ``__call__`` for hand-rolled tools.
     return tool(params)
 
