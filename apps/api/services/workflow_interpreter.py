@@ -418,16 +418,22 @@ class WorkflowInterpreter:
             api_version=self._settings.AZURE_OPENAI_API_VERSION,
         )
 
+    def _deployment(self) -> str:
+        """Deployment for workflow authoring — the dedicated authoring model
+        when configured, else the default chat deployment."""
+        return (
+            self._settings.AZURE_OPENAI_WORKFLOW_DEPLOYMENT
+            or self._settings.AZURE_OPENAI_DEPLOYMENT
+            or self._settings.AZURE_OPENAI_DEFAULT_MODEL
+        )
+
     @trace_llm
     async def _call_llm(
         self,
         *,
         messages: list[dict[str, Any]],
     ) -> str:
-        deployment = (
-            self._settings.AZURE_OPENAI_DEPLOYMENT
-            or self._settings.AZURE_OPENAI_DEFAULT_MODEL
-        )
+        deployment = self._deployment()
         client = self._azure_client()
         completion = await client.chat.completions.create(
             model=deployment,
@@ -469,10 +475,7 @@ class WorkflowInterpreter:
     ) -> str:
         """Plain-text completion (no JSON-mode), used for prose like node
         summaries. Mirrors :meth:`_call_llm` but without ``response_format``."""
-        deployment = (
-            self._settings.AZURE_OPENAI_DEPLOYMENT
-            or self._settings.AZURE_OPENAI_DEFAULT_MODEL
-        )
+        deployment = self._deployment()
         client = self._azure_client()
         completion = await client.chat.completions.create(
             model=deployment,

@@ -110,7 +110,11 @@ async def call_workflow_clarifier_async(
         {"role": "system", "content": WORKFLOW_CLARIFIER_PROMPT},
         {"role": "user", "content": user_msg},
     ]
-    deployment = settings.AZURE_OPENAI_DEPLOYMENT or settings.AZURE_OPENAI_DEFAULT_MODEL
+    deployment = (
+        settings.AZURE_OPENAI_WORKFLOW_DEPLOYMENT
+        or settings.AZURE_OPENAI_DEPLOYMENT
+        or settings.AZURE_OPENAI_DEFAULT_MODEL
+    )
     client = llm_client or _azure_client(settings)
     try:
         completion = await client.chat.completions.create(

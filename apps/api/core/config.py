@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION: str = "2024-08-01-preview"
     AZURE_OPENAI_DEPLOYMENT: str = "gpt-4o-mini"
     AZURE_OPENAI_DEFAULT_MODEL: str = "gpt-4o-mini"
+    # Model used ONLY for workflow authoring (NL→DAG interpret, augment/refine,
+    # node summaries, and clarifying questions). Chat and in-workflow agents keep
+    # AZURE_OPENAI_DEPLOYMENT. Falls back to AZURE_OPENAI_DEPLOYMENT if left blank.
+    AZURE_OPENAI_WORKFLOW_DEPLOYMENT: str = "gpt-4o"
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "text-embedding-3-small"
     AZURE_OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
