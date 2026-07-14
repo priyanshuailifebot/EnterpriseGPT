@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { api } from "@/lib/api";
 import type {
   ClarificationQuestion,
+  SelfHealConfig,
   WorkflowCreateBody,
   WorkflowDefinition,
   WorkflowDetailOut,
@@ -34,6 +35,7 @@ type WorkflowStore = {
   renameWorkflow: (id: string, name: string) => Promise<WorkflowSummaryOut>;
   publishWorkflow: (id: string) => Promise<WorkflowSummaryOut>;
   unpublishWorkflow: (id: string) => Promise<WorkflowSummaryOut>;
+  setSelfHeal: (id: string, config: SelfHealConfig) => Promise<WorkflowSummaryOut>;
   setCurrentWorkflow: (d: WorkflowDetailOut | null) => void;
 };
 
@@ -155,6 +157,21 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   async unpublishWorkflow(id) {
     const { data } = await api.post<WorkflowSummaryOut>(
       `/api/v1/workflows/${id}/unpublish`,
+    );
+    set((s) => ({
+      workflows: s.workflows.map((w) => (w.id === id ? data : w)),
+      currentWorkflow:
+        s.currentWorkflow?.workflow.id === id ?
+          { ...s.currentWorkflow, workflow: data }
+        : s.currentWorkflow,
+    }));
+    return data;
+  },
+
+  async setSelfHeal(id, config) {
+    const { data } = await api.put<WorkflowSummaryOut>(
+      `/api/v1/workflows/${id}/self-heal`,
+      config,
     );
     set((s) => ({
       workflows: s.workflows.map((w) => (w.id === id ? data : w)),

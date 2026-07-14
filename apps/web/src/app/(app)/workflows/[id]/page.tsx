@@ -9,6 +9,7 @@ import { useStore } from "zustand";
 
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { InteractiveCanvas } from "@/components/workflow/InteractiveCanvas";
+import { SelfHealMenu } from "@/components/workflow/SelfHealMenu";
 import {
   createWorkflowEditorStore,
   type EditorStore,
@@ -92,6 +93,7 @@ export default function WorkflowDetailPage() {
               Test
             </button>
           ) : null}
+          <SelfHealMenu workflowId={id} current={current.workflow.self_heal} />
           <Link
             href={`/workflows/${id}/run`}
             className="rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white"

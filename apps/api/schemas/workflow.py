@@ -78,6 +78,14 @@ class _BaseNode(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     depends_on: list[str] = Field(default_factory=list)
     activate_on: dict[str, str] | None = Field(default=None)
+    # Failure policy (currently honored for action nodes; see extended_executor):
+    #   "fail"     — node error aborts the execution (default; unchanged).
+    #   "continue" — node error is non-fatal; the node is marked skipped so its
+    #                dependents prune, and the run proceeds.
+    #   "route"    — node error is non-fatal and sets an "ok"/"failed" decision
+    #                so downstream nodes can gate via ``activate_on`` (an error
+    #                branch, e.g. notify-recruiter), mirroring IfNode branching.
+    on_error: Literal["fail", "continue", "route"] = "fail"
 
 
 class AgentNode(_BaseNode):
@@ -1149,6 +1157,8 @@ class WorkflowSummaryOut(BaseModel):
     created_by: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    # Per-workflow autonomous self-heal policy (null = never auto-healed).
+    self_heal: dict | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

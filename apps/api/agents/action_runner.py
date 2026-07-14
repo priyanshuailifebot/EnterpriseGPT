@@ -576,6 +576,101 @@ def _normalize_composio_arguments(
     return out
 
 
+def _ats_demo_stub(params: dict[str, Any]) -> dict[str, Any]:
+    """Sample candidate shortlist for draft/demo runs of the ATS search action.
+
+    Shape matches the ``ats`` connector contract (list under ``data``) so the
+    sourcing template's ``for_each`` iterates realistically without a live ATS.
+    """
+    role = str(params.get("role") or "Field Sales Advisor")
+    samples = [
+        {
+            "candidate_id": "cand-001",
+            "name": "Asha Rao",
+            "email": "asha.rao@example.com",
+            "phone": "+91-90000-00001",
+            "role": role,
+        },
+        {
+            "candidate_id": "cand-002",
+            "name": "Vikram Singh",
+            "email": "vikram.singh@example.com",
+            "phone": "+91-90000-00002",
+            "role": role,
+        },
+    ]
+    return {
+        "__provider__": "ats",
+        "__action__": "ats_search_candidates",
+        "__dry_run__": True,
+        "data": samples,
+    }
+
+
+def _sign_link(params: dict[str, Any], *, workspace_id: UUID | None = None) -> dict[str, Any]:
+    """Build a signed trigger link. ``params``:
+      * ``context`` — dict baked into the signed token (e.g. candidate_id).
+      * ``path``    — path appended to the app base URL (e.g. the slug-based
+                      trigger route ``/api/v1/workflows/slug/{trigger_slug}`` or
+                      a frontend form page).
+      * ``ttl_seconds`` — optional link lifetime (default 7 days).
+    The workspace id is auto-baked into the token under ``__ws__`` so the
+    slug-based trigger route can resolve the sibling workflow without the caller
+    knowing its id. Returns ``data.url`` and ``data.token``.
+    """
+    from core.config import get_settings
+    from core.security import sign_trigger_context
+
+    context = dict(params.get("context")) if isinstance(params.get("context"), dict) else {}
+    if workspace_id is not None and "__ws__" not in context:
+        context["__ws__"] = str(workspace_id)
+    path = str(params.get("path") or "")
+    ttl = int(params.get("ttl_seconds") or 7 * 24 * 3600)
+    token = sign_trigger_context(context, ttl_seconds=ttl)
+    settings = get_settings()
+    # base="web" → the frontend (for user-facing form pages); default → the API.
+    if str(params.get("base") or "").lower() == "web":
+        base = (getattr(settings, "WEB_PUBLIC_URL", "") or "").rstrip("/")
+    else:
+        base = (getattr(settings, "APP_PUBLIC_URL", "") or "").rstrip("/")
+    sep = "&" if "?" in path else "?"
+    url = f"{base}{path}{sep}ctx={token}" if base else f"{path}{sep}ctx={token}"
+    return {
+        "__provider__": "internal",
+        "__action__": "sign_link",
+        "__dry_run__": False,
+        "data": {"url": url, "token": token},
+    }
+
+
+_VOICE_ROUTE_KEY = "egpt:voice:route:{call_id}"
+_VOICE_ROUTE_TTL = 6 * 3600
+
+
+async def _register_voice_route(
+    params: dict[str, Any], *, workspace_id: UUID | None, live: bool
+) -> dict[str, Any]:
+    """Persist ``call_id → {workspace_id, target_slug, ctx}`` so the Retell
+    call-ended callback knows which workflow (by webhook-trigger slug) to fire
+    for this candidate. Preview runs skip the write (no real call placed)."""
+    import json as _json
+
+    call_id = str(params.get("call_id") or "").strip()
+    target_slug = str(params.get("target_slug") or "").strip()
+    ctx = params.get("context") if isinstance(params.get("context"), dict) else {}
+    if not call_id or not target_slug:
+        return {"ok": False, "error": "call_id and target_slug are required"}
+    if not live or workspace_id is None:
+        return {"__dry_run__": True, "data": {"call_id": call_id, "target_slug": target_slug}}
+    from core.redis import get_redis
+
+    record = {"workspace_id": str(workspace_id), "target_slug": target_slug, "ctx": ctx}
+    await get_redis().set(
+        _VOICE_ROUTE_KEY.format(call_id=call_id), _json.dumps(record), ex=_VOICE_ROUTE_TTL
+    )
+    return {"data": {"registered": True, "call_id": call_id}}
+
+
 def _generate_pdf(params: dict[str, Any]) -> dict[str, Any]:
     """Render markdown/plain text to a PDF payload (base64 envelope)."""
     from services.pdf_service import render_pdf_result
@@ -872,6 +967,24 @@ async def invoke_action(
         "render_pdf",
     }:
         return _generate_pdf(params or {})
+
+    # internal.sign_link (P7′): build a signed trigger link. Pure computation
+    # (not side-effecting), so it runs in preview/draft too — the invite email
+    # can show a real, tamper-proof link before publish.
+    if prov == "internal" and slug == "sign_link":
+        return _sign_link(params or {}, workspace_id=workspace_id)
+
+    # internal.register_voice_route (P9): map a Retell call_id → the workflow to
+    # fire when the call ends (the scoring workflow, referenced by trigger slug),
+    # plus the candidate context. The Retell callback endpoint reads this back.
+    if prov == "internal" and slug == "register_voice_route":
+        return await _register_voice_route(params or {}, workspace_id=workspace_id, live=live)
+
+    # ATS candidate search scaffold: in draft/demo (not live) return a sample
+    # shortlist so the recruitment templates run end-to-end without a live ATS.
+    # Live runs fall through to the real bearer-HTTP connector.
+    if slug == "ats_search_candidates" and not live:
+        return _ats_demo_stub(params or {})
 
     # Publish-gate: block real side effects unless the workflow is live.
     if not live and _is_side_effecting(prov, slug):

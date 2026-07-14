@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     API_WORKERS: int = 1
     # Base URL for OAuth redirects back to this API (no trailing slash).
     APP_PUBLIC_URL: str = "http://localhost:8000"
+    # Public base URL of the web app — used for user-facing links (e.g. the
+    # candidate slot-selection form) that live in the frontend, not the API.
+    WEB_PUBLIC_URL: str = "http://localhost:3000"
     SECRET_KEY: str = "change-me-to-a-long-random-string-in-production"
     JWT_EXPIRE_MINUTES: int = 480
     JWT_REFRESH_EXPIRE_DAYS: int = 30
@@ -62,6 +65,28 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str = "egpt_dev_redis_password"
     REDIS_URL: str = "redis://:egpt_dev_redis_password@redis:6379/0"
+
+    # ---------- Self-healing (Doctor) monitor — headless paths only ----------
+    # Interactive chat/editor heals ignore these entirely; they always gate on an
+    # explicit human accept. See docs/SELF_HEALING_PLAN.md §5.
+    AGENT_SELF_HEAL_MONITOR: bool = False  # master switch for the ARQ cron
+    # Global ceiling over each workflow's own policy: a workflow set to
+    # "autonomous" still only drafts if this is "safe".
+    AGENT_SELF_HEAL_AUTO_APPLY: Literal["off", "safe", "autonomous"] = "safe"
+    AGENT_SELF_HEAL_SIMULATE: bool = False  # verify via simulation in safe mode (always on in autonomous)
+    AGENT_SELF_HEAL_COOLDOWN_SECONDS: int = 21600  # 6h min gap between heals of one workflow
+    AGENT_SELF_HEAL_MAX_PER_PASS: int = 3  # workflows healed per cron tick
+    AGENT_SELF_HEAL_WINDOW_MINUTES: int = 60  # run-scan lookback window
+    AGENT_SELF_HEAL_INTERVAL_MINUTES: int = 60  # how often the cron fires
+
+    # ---------- Workflow schedule triggers (ARQ dispatcher) ----------
+    # Master switch for the cron that fires schedule-triggered workflows.
+    WORKFLOW_SCHEDULER_ENABLED: bool = False
+
+    # ---------- Voice interview (Retell) call-ended webhook (P9) ----------
+    # Shared secret Retell must present (X-Retell-Secret) on the call-ended
+    # callback. Empty disables the callback endpoint (returns 503).
+    RETELL_WEBHOOK_SECRET: str = ""
 
     # ---------- Qdrant ----------
     QDRANT_URL: str = "http://qdrant:6333"

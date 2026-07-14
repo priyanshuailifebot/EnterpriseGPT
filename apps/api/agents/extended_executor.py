@@ -45,6 +45,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.action_runner import invoke_action, render_placeholders
+from agents.tool_resolver import _with_timeout_and_retry
 from agents.dynamiq_service import DynamiqService
 from agents.kb_tool import agent_uses_kb, kb_search
 from core.config import Settings, get_settings
@@ -1008,10 +1009,22 @@ class ExtendedWorkflowExecutor:
                     params_preview=_preview(node.params, limit=160),
                     allow_dry_run=node.allow_dry_run,
                 )
+                # Consume the action's events. An ``error`` event is intercepted
+                # (not yielded straight through) so the node's ``on_error`` policy
+                # decides whether it's fatal, skipped, or routed (P4).
+                action_failed = False
+                action_succeeded = False
+                action_error_msg: str | None = None
                 async for ev in self._run_action(node, outputs=outputs):
+                    if ev.get("type") == "error":
+                        action_failed = True
+                        action_error_msg = ev.get("message")
+                        node_logger.error("action.error", message=action_error_msg)
+                        continue
                     yield ev
                     if ev.get("type") == "action_result":
                         outputs[node_id] = ev.get("result")
+                        action_succeeded = True
                         result = ev.get("result") or {}
                         if bool(result.get("__dry_run__")):
                             tally["actions_dry_run"] += 1
@@ -1028,6 +1041,7 @@ class ExtendedWorkflowExecutor:
                         )
                     elif ev.get("type") == "action_dry_run":
                         outputs[node_id] = ev.get("result")
+                        action_succeeded = True
                         result = ev.get("result") or {}
                         tally["actions_dry_run"] += 1
                         node_logger.info(
@@ -1042,10 +1056,42 @@ class ExtendedWorkflowExecutor:
                             action_slug=ev.get("action_slug"),
                             auto_approved=bool(ev.get("auto_approved")),
                         )
-                    elif ev.get("type") == "error":
-                        node_logger.error(
-                            "action.error", message=ev.get("message"),
-                        )
+
+                policy = getattr(node, "on_error", "fail")
+                if action_failed:
+                    if policy == "continue":
+                        # Non-fatal: prune dependents, keep the run going.
+                        skipped.add(node_id)
+                        tally["nodes_skipped"] += 1
+                        node_logger.info("action.error_handled", policy="continue")
+                        yield {
+                            "type": "node_error", "node_id": node_id,
+                            "name": node.name, "handled": "continue",
+                            "message": action_error_msg,
+                        }
+                    elif policy == "route":
+                        # Non-fatal: set a "failed" decision so an error branch can
+                        # gate via activate_on={node: "failed"}.
+                        outputs[node_id] = {"ok": False, "__error__": action_error_msg}
+                        decisions[node_id] = "failed"
+                        await self._persist_decisions(execution_id, decisions)
+                        node_logger.info("action.error_handled", policy="route")
+                        yield {
+                            "type": "node_error", "node_id": node_id,
+                            "name": node.name, "handled": "route",
+                            "message": action_error_msg,
+                        }
+                    else:
+                        # Default "fail": re-emit as a fatal error so the service
+                        # marks the execution FAILED (unchanged behavior).
+                        yield {
+                            "type": "error", "node_id": node_id,
+                            "name": node.name, "message": action_error_msg,
+                        }
+                elif policy == "route" and action_succeeded:
+                    # Success on a routing node → "ok" decision for the ok-branch.
+                    decisions[node_id] = "ok"
+                    await self._persist_decisions(execution_id, decisions)
 
             elif isinstance(node, IfNode):
                 branch = _evaluate_if(node.expression, outputs)
@@ -1592,13 +1638,39 @@ class ExtendedWorkflowExecutor:
                         # Params template against ``item_outputs`` which now
                         # exposes the iteration var, so {{ candidate.Email }}
                         # resolves to this item.
+                        item_failed = False
+                        item_err: str | None = None
                         async for ev in self._run_action(
                             sub_node, outputs=item_outputs
                         ):
                             ev = {**ev, "for_each_index": idx, "for_each_id": node.id}
+                            if ev.get("type") == "error":
+                                item_failed = True
+                                item_err = ev.get("message")
+                                continue  # defer to the node's on_error policy
                             events.append(ev)
                             if ev.get("type") in ("action_result", "action_dry_run"):
                                 item_outputs[body_id] = ev.get("result")
+                        if item_failed:
+                            # ``fail`` (default) aborts the whole run as before.
+                            # ``continue``/``route`` ISOLATE this item's failure
+                            # so one bad item doesn't kill the batch (per-item
+                            # error branches aren't supported inside a loop, so
+                            # route degrades to continue here).
+                            policy = getattr(sub_node, "on_error", "fail")
+                            if policy in ("continue", "route"):
+                                item_skipped.add(body_id)
+                                events.append({
+                                    "type": "node_error", "node_id": body_id,
+                                    "name": sub_node.name, "handled": policy,
+                                    "message": item_err, "for_each_index": idx,
+                                })
+                            else:
+                                events.append({
+                                    "type": "error", "node_id": body_id,
+                                    "name": sub_node.name, "message": item_err,
+                                    "for_each_index": idx,
+                                })
                     else:
                         # Nested control-flow (condition/for_each/etc.) and
                         # data_store inside a for_each body remain out of scope.
@@ -1725,8 +1797,15 @@ class ExtendedWorkflowExecutor:
             "action_slug": node.action_slug,
             "params": rendered_params,
         }
-        try:
-            result = await invoke_action(
+        # Honor the node's timeout/retry config for top-level actions (P5).
+        # Previously these fields only applied when the action ran as an agent
+        # satellite; reuse the same wrapper here. It retries on
+        # exception/timeout with exponential backoff and returns a structured
+        # error dict (``ok: False`` + ``code``) on final failure rather than
+        # raising. invoke_action's success dicts never carry a top-level ``ok``,
+        # so the wrapper never mistakes a real result for a retryable failure.
+        async def _invoke(_args: dict[str, Any]) -> dict[str, Any]:
+            return await invoke_action(
                 provider_id=node.provider,
                 action_slug=node.action_slug,
                 params=rendered_params if isinstance(rendered_params, dict) else {"value": rendered_params},
@@ -1737,12 +1816,21 @@ class ExtendedWorkflowExecutor:
                 live=self._live,
                 connection_id=getattr(node, "connection_id", None),
             )
-        except Exception as exc:  # noqa: BLE001
+
+        wrapped = _with_timeout_and_retry(
+            _invoke,
+            timeout_ms=getattr(node, "timeout_ms", 30000),
+            max_retries=getattr(node, "max_retries", 1),
+            initial_delay_ms=getattr(node, "retry_initial_delay_ms", 200),
+            label=node.action_slug,
+        )
+        result = await wrapped({})
+        if result.get("ok") is False and result.get("code") in ("timeout", "exception"):
             yield {
                 "type": "error",
                 "node_id": node.id,
                 "name": node.name,
-                "message": f"action {node.action_slug} failed: {exc}",
+                "message": f"action {node.action_slug} failed after retries: {result.get('error')}",
             }
             return
 

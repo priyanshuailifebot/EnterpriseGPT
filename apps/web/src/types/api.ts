@@ -122,6 +122,8 @@ interface _BaseNode {
   name: string;
   depends_on: string[];
   activate_on?: Record<string, string> | null;
+  /** Failure policy (honored for action nodes). See extended_executor P4. */
+  on_error?: "fail" | "continue" | "route";
 }
 
 export interface AgentNode extends _BaseNode {
@@ -290,6 +292,14 @@ export function isReadyResponse(r: InterpretResponse): r is ReadyResponse {
 
 export type WorkflowStatus = "draft" | "published" | "archived";
 
+export type SelfHealPolicy = "off" | "safe" | "autonomous";
+
+export interface SelfHealConfig {
+  enabled: boolean;
+  policy: SelfHealPolicy;
+  cooldown_seconds: number;
+}
+
 export interface WorkflowSummaryOut {
   id: string;
   workspace_id: string;
@@ -302,6 +312,7 @@ export interface WorkflowSummaryOut {
   created_by: string;
   created_at: string;
   updated_at: string;
+  self_heal?: SelfHealConfig | null;
 }
 
 export interface WorkflowCreateBody {
@@ -349,6 +360,99 @@ export interface AugmentResponse {
   changes: string[];
 }
 
+// ---- Self-healing (Doctor) — mirrors apps/api/schemas/healing.py ----
+
+export type HealFindingCategory =
+  | "prompt_issue"
+  | "edge_condition_issue"
+  | "extraction_issue"
+  | "graph_structure_issue"
+  | "tool_failure"
+  | "integration_failure"
+  | "configuration_issue"
+  | "other";
+
+export type HealSeverity = "low" | "medium" | "high" | "critical";
+export type HealHealth = "healthy" | "degraded" | "broken" | "unknown";
+export type HealVerdict = "pass" | "warn" | "fail" | "unknown";
+
+export interface HealFinding {
+  finding_id: string;
+  category: HealFindingCategory;
+  severity: HealSeverity;
+  node_ids: string[];
+  summary: string;
+  evidence: string;
+  root_cause: string;
+  proposed_fix: string;
+  auto_fixable: boolean;
+}
+
+export interface HealingReport {
+  incident_id: string;
+  workflow_id: string;
+  workspace_id?: string | null;
+  health: HealHealth;
+  summary: string;
+  findings: HealFinding[];
+  evidence_source: string;
+  triggered_by: string;
+  patches_applied: string[];
+  patches_proposed: string[];
+  validation_passed: boolean | null;
+  simulation_verdict: string;
+  new_version_created: boolean;
+  published: boolean;
+}
+
+export type HealEventType =
+  | "heal_start"
+  | "evidence"
+  | "diagnosis"
+  | "validation"
+  | "verification"
+  | "healing_report"
+  | "patch_failed"
+  | "propose"
+  | "error"
+  | "heartbeat";
+
+// One SSE frame from POST /workflows/{id}/heal. Fields are per-event-type;
+// all optional so a single shape covers the union.
+export interface HealEvent {
+  type: HealEventType;
+  workflow_id?: string;
+  // evidence
+  source?: string;
+  runs?: number;
+  // diagnosis / propose / healing_report
+  report?: HealingReport;
+  // validation / propose
+  valid?: boolean;
+  changes?: string[];
+  scope_warnings?: string[];
+  sanitizer_notes?: string[];
+  required_providers?: string[];
+  // propose
+  proposed_definition?: WorkflowDefinition;
+  // verification
+  ran?: boolean;
+  reached_end?: boolean;
+  verdict?: HealVerdict;
+  reason?: string;
+  node_path?: string[];
+  // error / patch_failed
+  content?: string;
+  error?: string | null;
+}
+
+export interface HealRequestBody {
+  mode?: "agent" | "plan" | "ask";
+  complaint?: string;
+  selected_finding_ids?: string[] | null;
+  simulate?: boolean;
+}
+
 export interface NodeSummaryResponse {
   summary: string;
   cached: boolean;
@@ -391,6 +495,7 @@ export type ExecutionEventType =
   | "wait_for_webhook"
   | "webhook_resumed"
   | "node_skipped"
+  | "node_error"
   | "trigger_fired"
   | "action_invoked"
   | "action_result"

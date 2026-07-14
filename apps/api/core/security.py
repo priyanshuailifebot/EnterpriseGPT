@@ -166,6 +166,47 @@ def generate_secure_token(num_bytes: int = 32) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Signed trigger context (P7′)
+#
+# Email links (candidate slot form, recruiter approve/reject) must carry a
+# tamper-proof payload — e.g. ``{"candidate_id": "...", "purpose": "slot"}`` —
+# that a webhook/form trigger validates and injects into the execution input.
+# Minted as a short-lived JWT so it reuses the app secret + jose, and can't be
+# forged or replayed past its TTL.
+# ---------------------------------------------------------------------------
+
+_TRIGGER_CTX_TYPE = "trigger_ctx"
+
+
+def sign_trigger_context(
+    context: dict[str, Any], *, ttl_seconds: int = 7 * 24 * 3600
+) -> str:
+    """Sign an arbitrary (JSON-serializable) context dict into a URL-safe token."""
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    payload = {
+        "typ": _TRIGGER_CTX_TYPE,
+        "ctx": context,
+        "iat": now,
+        "exp": now + timedelta(seconds=max(1, ttl_seconds)),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def verify_trigger_context(token: str) -> dict[str, Any] | None:
+    """Return the signed context dict, or None if the token is invalid/expired."""
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("typ") != _TRIGGER_CTX_TYPE:
+        return None
+    ctx = payload.get("ctx")
+    return ctx if isinstance(ctx, dict) else None
+
+
+# ---------------------------------------------------------------------------
 # Token blacklist (Redis)
 # ---------------------------------------------------------------------------
 

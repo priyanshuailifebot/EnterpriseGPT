@@ -94,6 +94,7 @@ def _register_routers(app: FastAPI) -> None:
     from routers.integrations import router as integrations_router
     from routers.mcp_servers import router as mcp_servers_router
     from routers.reports import router as reports_router
+    from routers.voice import router as voice_router
     from routers.workflows import router as workflows_router
 
     app.include_router(auth_router, prefix="/api/v1")
@@ -106,6 +107,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(mcp_servers_router, prefix="/api/v1")
     app.include_router(documents_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(voice_router, prefix="/api/v1")
 
 
 def create_app() -> FastAPI:

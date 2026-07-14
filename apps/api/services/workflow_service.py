@@ -24,15 +24,16 @@ from egpt_mcp.mcp_tool_registry import MCPToolError, MCPToolRegistry
 from egpt_mcp.tool_registry import ToolRegistry
 from egpt_mcp.tool_run_buffer import ToolRunBuffer
 from models.integration import Integration, IntegrationStatus
+from models.native_connection import NativeConnection, NativeConnectionStatus
 from models.user import User
-from models.workflow import Workflow as WFRow, WorkflowStatus
+from models.workflow import Workflow as WFRow
+from models.workflow import WorkflowStatus
 from models.workflow_execution import WorkflowExecution, WorkflowExecutionStatus
 from models.workflow_execution_step import (
     WorkflowExecutionStep,
     WorkflowExecutionStepStatus,
 )
 from models.workflow_version import WorkflowVersion
-from models.native_connection import NativeConnection, NativeConnectionStatus
 from models.workspace_member import WorkspaceMember
 from schemas.workflow import (
     InterpretRequest,
@@ -44,7 +45,6 @@ from schemas.workflow import (
     WorkflowUpdateBody,
     slugify_name,
 )
-from services.workflow_requirements import derive_requirements
 from services.clarification_service import (
     ClarificationAccessDeniedError,
     ClarificationReady,
@@ -57,6 +57,7 @@ from services.workflow_interpreter import (
     WorkflowInterpreter,
     diff_definitions,
 )
+from services.workflow_requirements import derive_requirements
 
 log = structlog.get_logger("enterprisegpt.workflow")
 EXECUTION_TTL_SECONDS = 86400
@@ -699,7 +700,8 @@ class WorkflowService:
         publish something that was never executed) AND that its readiness
         verdict had no blocking issues. Raises HTTP 409 otherwise.
         """
-        from fastapi import HTTPException, status as http_status
+        from fastapi import HTTPException
+        from fastapi import status as http_status
 
         row = await self._fetch_workflow_for_user(db, user_id=user.id, workflow_id=workflow_id)
         if row is None:
@@ -773,7 +775,8 @@ class WorkflowService:
         workflow_id: UUID,
     ) -> WFRow:
         """Take a workflow back to ``draft`` — live runs revert to previews."""
-        from fastapi import HTTPException, status as http_status
+        from fastapi import HTTPException
+        from fastapi import status as http_status
 
         row = await self._fetch_workflow_for_user(db, user_id=user.id, workflow_id=workflow_id)
         if row is None:
@@ -781,6 +784,71 @@ class WorkflowService:
         row.status = WorkflowStatus.DRAFT
         row.published_at = None
         row.published_version_id = None
+        await db.commit()
+        await db.refresh(row)
+        return row
+
+    async def rollback_workflow(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        workflow_id: UUID,
+        target_version: int,
+    ) -> WFRow:
+        """Restore a prior version's definition as a new current version.
+
+        Since versions are immutable and publish always targets the latest
+        version, "rollback" re-appends the target version's definition as a new
+        version (reverting the workflow to draft, per ``update_workflow``). The
+        caller re-runs and re-publishes to take the restored definition live.
+        """
+        from fastapi import HTTPException
+        from fastapi import status as http_status
+
+        row = await self._fetch_workflow_for_user(db, user_id=user.id, workflow_id=workflow_id)
+        if row is None:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND)
+        target = (
+            await db.execute(
+                select(WorkflowVersion).where(
+                    WorkflowVersion.workflow_id == row.id,
+                    WorkflowVersion.version == target_version,
+                )
+            )
+        ).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=f"version {target_version} not found",
+            )
+        return await self.update_workflow(
+            db,
+            user=user,
+            workflow_id=workflow_id,
+            body=WorkflowUpdateBody(
+                definition=WorkflowDefinition.model_validate(target.definition),
+                change_note=f"rollback to v{target_version}",
+            ),
+        )
+
+    async def set_self_heal(
+        self,
+        db: AsyncSession,
+        *,
+        user: User,
+        workflow_id: UUID,
+        config: dict,
+    ) -> WFRow:
+        """Set the workflow's autonomous self-heal policy (operational config —
+        does NOT create a new version)."""
+        from fastapi import HTTPException
+        from fastapi import status as http_status
+
+        row = await self._fetch_workflow_for_user(db, user_id=user.id, workflow_id=workflow_id)
+        if row is None:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND)
+        row.self_heal = config
         await db.commit()
         await db.refresh(row)
         return row

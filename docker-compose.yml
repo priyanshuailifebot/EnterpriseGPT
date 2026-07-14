@@ -279,6 +279,36 @@ services:
     networks:
       - egpt-net
 
+  # Background worker: self-heal monitor cron (ARQ). Shares the api image but
+  # runs the ARQ worker instead of uvicorn. Skips the migration entrypoint —
+  # the api service owns migrations; the worker waits for it to be healthy.
+  api-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: development
+    container_name: egpt-api-worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-egpt}:${POSTGRES_PASSWORD:-egpt_dev_password}@postgres:5432/${POSTGRES_DB:-enterprisegpt}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-egpt_dev_redis_password}@redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
+    volumes:
+      - ./apps/api:/app
+      - ./dynamiq:/dynamiq
+    entrypoint: []
+    command: ["arq", "tasks.worker.WorkerSettings"]
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - egpt-net
+
   web:
     build:
       context: .

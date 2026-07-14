@@ -40,7 +40,7 @@ import {
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
-import { Plug, PlayCircle, Redo2, Rocket, Save, Undo2, Wand2 } from "lucide-react";
+import { Plug, PlayCircle, Redo2, Rocket, Save, Stethoscope, Undo2, Wand2 } from "lucide-react";
 import {
   type DragEvent,
   type KeyboardEvent,
@@ -70,6 +70,7 @@ import { NodePalette, PALETTE_DRAG_MIME } from "./NodePalette";
 import { PropertyInspector } from "./PropertyInspector";
 import { RequiredIntegrationsPanel } from "./RequiredIntegrationsPanel";
 import { TestRunPanel } from "./TestRunPanel";
+import { HealPanel } from "./HealPanel";
 import { WorkflowChatPanel, type ChatSubmitResult } from "./WorkflowChatPanel";
 import { type ExecutionRunState } from "./execution-status";
 import { type EditorStore } from "./useWorkflowEditor";
@@ -164,6 +165,7 @@ function CanvasInner({
   // of the editable store definition.
   // ----------------------------------------------------------------------
   const [chatOpen, setChatOpen] = useState(false);
+  const [healOpen, setHealOpen] = useState(false);
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [preview, setPreview] = useState<
     { proposed: WorkflowDefinition; diff: NodeDiff } | null
@@ -631,6 +633,7 @@ function CanvasInner({
           errorCount={errorCount}
           saving={saving}
           showAugment={!!onAugment}
+          showHeal={!readOnly && !!workflowId}
           canTestRun={!!workflowId}
           status={wfStatus}
           publishing={publishing}
@@ -641,10 +644,17 @@ function CanvasInner({
           onRedo={redo}
           onOpenRefine={() => {
             setIntegrationsOpen(false);
+            setHealOpen(false);
             setChatOpen((o) => !o);
+          }}
+          onOpenHeal={() => {
+            setChatOpen(false);
+            setIntegrationsOpen(false);
+            setHealOpen((o) => !o);
           }}
           onOpenIntegrations={() => {
             setChatOpen(false);
+            setHealOpen(false);
             setIntegrationsOpen((o) => !o);
           }}
           onOpenTestRun={() => setTestPanelOpen(true)}
@@ -736,6 +746,20 @@ function CanvasInner({
         onReject={rejectPreview}
       />
 
+      <HealPanel
+        open={healOpen}
+        onClose={() => setHealOpen(false)}
+        workflowId={workflowId ?? null}
+        disabled={!workflowId}
+        pendingPreview={preview !== null}
+        onProposeFix={(proposed) => {
+          const current = store.getState().definition;
+          const diff = diffDefinitions(current, proposed);
+          if (diffIsEmpty(diff)) return;
+          setPreview({ proposed, diff });
+        }}
+      />
+
       <RequiredIntegrationsPanel
         open={integrationsOpen}
         onClose={() => setIntegrationsOpen(false)}
@@ -788,6 +812,7 @@ function Toolbar({
   errorCount,
   saving,
   showAugment,
+  showHeal,
   canTestRun,
   status,
   publishing,
@@ -797,6 +822,7 @@ function Toolbar({
   onUndo,
   onRedo,
   onOpenRefine,
+  onOpenHeal,
   onOpenIntegrations,
   onOpenTestRun,
 }: {
@@ -806,6 +832,7 @@ function Toolbar({
   errorCount: number;
   saving: boolean;
   showAugment: boolean;
+  showHeal: boolean;
   canTestRun: boolean;
   status: WorkflowStatus | null;
   publishing: boolean;
@@ -815,6 +842,7 @@ function Toolbar({
   onUndo: () => void;
   onRedo: () => void;
   onOpenRefine: () => void;
+  onOpenHeal: () => void;
   onOpenIntegrations: () => void;
   onOpenTestRun: () => void;
 }) {
@@ -907,6 +935,20 @@ function Toolbar({
         >
           <Wand2 className="h-4 w-4" />
           <span className="text-[12px] font-semibold">Refine with AI</span>
+        </button>
+      ) : null}
+      {showHeal ? (
+        <button
+          type="button"
+          onClick={onOpenHeal}
+          className={cn(
+            toolButtonClasses,
+            "flex items-center gap-1 text-brand-700 dark:text-brand-300",
+          )}
+          title="Diagnose this workflow and propose a fix"
+        >
+          <Stethoscope className="h-4 w-4" />
+          <span className="text-[12px] font-semibold">Diagnose &amp; Heal</span>
         </button>
       ) : null}
       <button

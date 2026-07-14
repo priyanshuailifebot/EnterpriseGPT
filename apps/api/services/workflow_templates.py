@@ -21,16 +21,19 @@ from typing import Any
 from schemas.workflow import (
     ActionNode,
     AgentNode,
-    ConditionNode,
     DataStoreNode,
-    ForEachNode,
-    IfNode,
     MemoryNode,
-    MergeNode,
     OutputParserNode,
     TriggerNode,
-    WaitForWebhookNode,
     WorkflowDefinition,
+)
+from services.recruitment_templates import (
+    HR_CHASER,
+    HR_DECISION,
+    HR_INTERVIEW,
+    HR_RANKING,
+    HR_SCORING,
+    HR_SOURCING,
 )
 
 
@@ -241,310 +244,6 @@ _CUSTOMER_SERVICE = WorkflowDefinition(
 )
 
 
-# ---------------------------------------------------------------------------
-# 2. HR Recruitment — exercises for_each + wait_for_webhook + voice MCP
-# ---------------------------------------------------------------------------
-
-
-_HR_RECRUITMENT = WorkflowDefinition(
-    name="HR Recruitment — Field Sales Advisor",
-    description=(
-        "JD → résumé match from Darwin Box → email shortlist → candidate "
-        "picks slot + language → outbound voice interview → score → schedule "
-        "qualified candidates with HR. Mirrors the n8n recruitment shape."
-    ),
-    trigger="manual",
-    output_format="json",
-    nodes=[
-        # ---------- Row 1 of the n8n screenshot ----------
-        TriggerNode(
-            id="start_recruitment",
-            name="Start Recruitment Process",
-            trigger_type="manual",
-            slug="hr-recruitment-start",
-            form_fields=[
-                {
-                    "key": "jd_text",
-                    "label": "Job description",
-                    "type": "text",
-                    "required": True,
-                },
-                {
-                    "key": "role_title",
-                    "label": "Role title",
-                    "type": "text",
-                    "required": True,
-                },
-            ],
-        ),
-        ActionNode(
-            id="fetch_cvs",
-            name="Fetch CVs from DarwinBox",
-            depends_on=["start_recruitment"],
-            provider="http_bearer",
-            action_slug="darwinbox_resume_search",
-            params={
-                "method": "GET",
-                "url_suffix": "/api/recruitment/candidates/search",
-                "query": {
-                    "jd": "{{ start_recruitment.jd_text }}",
-                    "role": "{{ start_recruitment.role_title }}",
-                    "limit": 10,
-                },
-            },
-        ),
-        DataStoreNode(
-            id="store_candidates",
-            name="Store Candidates in Dashboard",
-            depends_on=["fetch_cvs"],
-            op="write",
-            table="candidates",
-            key="{{ start_recruitment.role_title }}",
-            payload={
-                "role": "{{ start_recruitment.role_title }}",
-                "candidates": "{{ fetch_cvs.data }}",
-                "status": "shortlisted",
-            },
-        ),
-        ActionNode(
-            id="send_invite_email",
-            name="Send Interview Invitation Email",
-            depends_on=["store_candidates"],
-            provider="gmail",
-            action_slug="gmail_send",
-            params={
-                "to": "{{ fetch_cvs.data.0.email }}",
-                "subject": "Interview invitation — {{ start_recruitment.role_title }}",
-                "html_body": (
-                    "<p>Hi {{ fetch_cvs.data.0.name }},</p>"
-                    "<p>Please pick an interview slot here: "
-                    "{{ slot_form.public_url }}</p>"
-                ),
-            },
-        ),
-        DataStoreNode(
-            id="status_email_sent",
-            name="Update Status: Email Sent",
-            depends_on=["send_invite_email"],
-            op="write",
-            table="candidates",
-            key="{{ start_recruitment.role_title }}",
-            payload={"status": "email_sent"},
-        ),
-
-        # ---------- Row 2 of the n8n screenshot ----------
-        TriggerNode(
-            id="slot_form",
-            name="Interview Slot Selection Form",
-            trigger_type="form",
-            slug="interview-slot",
-            form_fields=[
-                {
-                    "key": "slot_iso",
-                    "label": "Preferred slot",
-                    "type": "text",
-                    "required": True,
-                },
-                {
-                    "key": "language",
-                    "label": "Preferred language",
-                    "type": "choice",
-                    "options": ["en-IN", "hi-IN", "ta-IN", "te-IN", "mr-IN"],
-                    "required": True,
-                },
-            ],
-        ),
-        WaitForWebhookNode(
-            id="wait_slot",
-            name="Wait for slot submission",
-            depends_on=["slot_form"],
-            description=(
-                "Candidate fills the slot selection form; submit POSTs to "
-                "the workflow's resume URL."
-            ),
-            timeout_seconds=604800,
-        ),
-        DataStoreNode(
-            id="store_schedule",
-            name="Store Interview Schedule",
-            depends_on=["wait_slot"],
-            op="write",
-            table="interview_schedule",
-            key="{{ wait_slot.candidate_id }}",
-            payload={
-                "slot_iso": "{{ wait_slot.slot_iso }}",
-                "language": "{{ wait_slot.language }}",
-                "status": "scheduled",
-            },
-        ),
-
-        # ---------- The composite AI agent ----------
-        AgentNode(
-            id="interview_conductor",
-            name="AI Interview Conductor",
-            role="Conversational interview agent.",
-            instructions=(
-                "Conduct the interview by calling start_interview with the "
-                "candidate phone, JD summary, and chosen language. Poll "
-                "get_interview_status until the call ends, then call "
-                "get_interview_transcript. Emit {call_id, transcript, "
-                "language}."
-            ),
-            tools=[
-                "start_interview",
-                "get_interview_status",
-                "get_interview_transcript",
-            ],
-            depends_on=["store_schedule"],
-        ),
-        ActionNode(
-            id="parse_assessment",
-            name="Interview Assessment Parser",
-            depends_on=["interview_conductor"],
-            provider="mcp",
-            action_slug="score_interview",
-            params={
-                "call_id": "{{ interview_conductor.call_id }}",
-                "rubric": [
-                    "local_market_knowledge",
-                    "relevant_industry_experience",
-                    "communication_skills",
-                    "past_experience",
-                    "customer_engagement_approach",
-                    "consultative_approach",
-                    "objection_handling",
-                    "customer_advisor_skills",
-                ],
-            },
-        ),
-        DataStoreNode(
-            id="store_results",
-            name="Store Interview Results",
-            depends_on=["parse_assessment"],
-            op="write",
-            table="interview_results",
-            key="{{ wait_slot.candidate_id }}",
-            payload={
-                "scores": "{{ parse_assessment.data.scores }}",
-                "overall": "{{ parse_assessment.data.overall }}",
-                "rationale": "{{ parse_assessment.data.rationale }}",
-            },
-        ),
-        ActionNode(
-            id="send_summary",
-            name="Send Interview Summary to Candidate",
-            depends_on=["store_results"],
-            provider="gmail",
-            action_slug="gmail_send",
-            params={
-                "to": "{{ fetch_cvs.data.0.email }}",
-                "subject": "Your interview summary",
-                "html_body": (
-                    "<p>Thank you for interviewing.</p>"
-                    "<p>Overall: {{ parse_assessment.data.overall }}%</p>"
-                    "<p>{{ parse_assessment.data.rationale }}</p>"
-                ),
-            },
-        ),
-        IfNode(
-            id="check_score",
-            name="Check Score > 75%",
-            depends_on=["send_summary"],
-            expression="$.parse_assessment.data.overall > 75",
-        ),
-        ActionNode(
-            id="check_availability",
-            name="Check HR Team Availability",
-            depends_on=["check_score"],
-            activate_on={"check_score": "true"},
-            provider="pipedream",
-            action_slug="pipedream_run_action",
-            params={
-                "app": "google_calendar",
-                "action": "freebusy_query",
-                "calendars": ["hr-team@company.com"],
-                "time_min": "{{ wait_slot.slot_iso }}",
-                "time_max": "{{ wait_slot.slot_iso }}",
-            },
-        ),
-        ActionNode(
-            id="schedule_hr",
-            name="Schedule HR Interview",
-            depends_on=["check_availability"],
-            provider="pipedream",
-            action_slug="pipedream_calendly_create_event",
-            params={
-                "calendar": "hr-team@company.com",
-                "attendees": ["{{ fetch_cvs.data.0.email }}"],
-                "start": "{{ check_availability.data.next_slot }}",
-                "duration_minutes": 30,
-                "summary": "HR round — {{ start_recruitment.role_title }}",
-            },
-        ),
-        DataStoreNode(
-            id="update_scheduled",
-            name="Update: HR Interview Scheduled",
-            depends_on=["schedule_hr"],
-            op="write",
-            table="interview_results",
-            key="{{ wait_slot.candidate_id }}",
-            payload={
-                "hr_interview_scheduled_at": "{{ schedule_hr.data.start }}",
-                "status": "hr_round_booked",
-            },
-        ),
-        DataStoreNode(
-            id="update_below",
-            name="Update: Below Threshold",
-            depends_on=["check_score"],
-            activate_on={"check_score": "false"},
-            op="write",
-            table="interview_results",
-            key="{{ wait_slot.candidate_id }}",
-            payload={"status": "below_threshold"},
-        ),
-
-        # ---------- Row 3 of the n8n screenshot — ranking sweep ----------
-        DataStoreNode(
-            id="get_all_for_ranking",
-            name="Get All Candidates for Ranking",
-            depends_on=["update_scheduled", "update_below"],
-            op="query",
-            table="interview_results",
-            filter={},
-        ),
-        AgentNode(
-            id="add_stack_ranking",
-            name="Add Stack Ranking",
-            role="Recruiting analyst.",
-            instructions=(
-                "Take the rows array from the upstream data_store query. "
-                "Sort by overall score descending. Emit JSON: "
-                "[{candidate_id, overall, rank}]."
-            ),
-            depends_on=["get_all_for_ranking"],
-        ),
-        DataStoreNode(
-            id="update_ranking",
-            name="Update Ranking in Dashboard",
-            depends_on=["add_stack_ranking"],
-            op="write",
-            table="candidate_ranking",
-            key="{{ start_recruitment.role_title }}",
-            payload={
-                "ranking": "{{ add_stack_ranking }}",
-            },
-        ),
-
-        MergeNode(
-            id="finalise",
-            name="Finalise",
-            depends_on=["update_ranking"],
-        ),
-    ],
-)
-
-
 _TEMPLATES: tuple[WorkflowTemplate, ...] = (
     WorkflowTemplate(
         slug="customer-service-triage",
@@ -570,40 +269,94 @@ _TEMPLATES: tuple[WorkflowTemplate, ...] = (
             "http_bearer",
         ),
     ),
+    # ---- HR recruitment chain (event-boundary). Correlated by candidate_id; ----
+    # ---- sibling workflows addressed by webhook-trigger slug. See           ----
+    # ---- services/recruitment_templates.py + docs/RECRUITMENT_WORKFLOW_PLAN. ----
     WorkflowTemplate(
-        slug="hr-recruitment-field-sales-advisor",
-        title="HR Recruitment — Field Sales Advisor",
+        slug="hr-sourcing",
+        title="HR Sourcing (batch)",
         summary=(
-            "JD → résumé match from Darwin Box → email invites → candidate "
-            "picks slot + language → voice interview → score → schedule "
-            "qualified candidates."
+            "Recruiter starts a run for a role → fetch matching candidates from "
+            "the ATS → email every candidate a signed slot-selection link."
         ),
         category="hr",
         prompt=(
-            "I'm an HR Recruitment agent for a life insurance company. Based "
-            "on the JD for Field Sales Advisor, fetch the best matching CVs "
-            "by resume parsing from Darwin Box HRMS, then email interview "
-            "links to all candidates. Candidates receive the email and "
-            "choose the slot for telephonic interview and their preferred "
-            "language. Based on the selection, candidates receive the "
-            "telephone call for interview and answer the questions in a "
-            "humanised experience covering local market knowledge, industry "
-            "experience, communication skills, past experience, customer "
-            "engagement approach, consultative approach, objection handling "
-            "and customer advisor skills. Post-interview the candidates get "
-            "summarisation and stack ranking; if a candidate scores >75%, "
-            "schedule the interview with HR team based on HR availability. "
-            "All candidate interview status should be available on a "
-            "dashboard for HR management."
+            "Source candidates for a role: pull matching résumés from the ATS "
+            "and email each candidate a link to pick an interview slot and "
+            "language. Kicks off the recruitment pipeline for the whole batch."
         ),
-        definition=_HR_RECRUITMENT,
-        required_integrations=(
-            "http_bearer",        # Darwin Box
-            "sendgrid",
-            "mcp",                # Voice-MCP server (Retell)
-            "pipedream",
-            "postgres",
+        definition=HR_SOURCING,
+        required_integrations=("ats", "gmail"),
+    ),
+    WorkflowTemplate(
+        slug="hr-interview-start",
+        title="HR Interview — Start Call",
+        summary=(
+            "Candidate submits their slot → place the outbound voice interview "
+            "call (Retell) and register it for scoring. Triggered by the signed "
+            "slot link."
         ),
+        category="hr",
+        prompt=(
+            "When a candidate picks their slot and language, place the "
+            "telephonic AI interview call and register it so scoring runs when "
+            "the call ends."
+        ),
+        definition=HR_INTERVIEW,
+        required_integrations=("mcp", "gmail"),
+    ),
+    WorkflowTemplate(
+        slug="hr-interview-scoring",
+        title="HR Interview — Score & Review",
+        summary=(
+            "Call ends → fetch transcript → score against the rubric → store "
+            "results → email the candidate a summary and send the recruiter "
+            "signed approve/reject links (human review gate)."
+        ),
+        category="hr",
+        prompt=(
+            "After the interview call ends, transcribe and score the candidate "
+            "across local-market knowledge, industry experience, communication, "
+            "past experience, customer engagement, consultative approach, "
+            "objection handling and advisor skills; summarise to the candidate "
+            "and ask a recruiter to approve or reject."
+        ),
+        definition=HR_SCORING,
+        required_integrations=("mcp", "gmail"),
+    ),
+    WorkflowTemplate(
+        slug="hr-decision",
+        title="HR Interview — Decision",
+        summary=(
+            "Recruiter approves → check HR availability and book the HR round; "
+            "rejects → record the outcome. Triggered by the approve/reject link."
+        ),
+        category="hr",
+        prompt=(
+            "On a recruiter's approve/reject decision, either schedule the HR "
+            "round based on HR-team availability, or record that the candidate "
+            "did not advance."
+        ),
+        definition=HR_DECISION,
+        required_integrations=("pipedream", "gmail"),
+    ),
+    WorkflowTemplate(
+        slug="hr-chaser",
+        title="HR Chaser — Slot Reminders",
+        summary="Daily scheduled sweep: remind sourced candidates who haven't picked a slot.",
+        category="hr",
+        prompt="Every day, remind candidates who were sourced but haven't yet chosen an interview slot.",
+        definition=HR_CHASER,
+        required_integrations=("gmail",),
+    ),
+    WorkflowTemplate(
+        slug="hr-ranking",
+        title="HR Ranking — Stack Rank",
+        summary="Weekly scheduled sweep: stack-rank interviewed candidates by overall score.",
+        category="hr",
+        prompt="Every week, stack-rank the interviewed candidates by their overall interview score.",
+        definition=HR_RANKING,
+        required_integrations=(),
     ),
 )
 

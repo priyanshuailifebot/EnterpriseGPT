@@ -20,12 +20,13 @@ from core.config import get_settings
 from core.database import get_db
 from core.deps import get_tool_registry
 from core.permissions import Permission, require_permission
-from core.security import get_current_active_user
+from core.security import get_current_active_user, verify_trigger_context
 from egpt_mcp.tool_registry import ToolRegistry
 from models.user import User
 from models.workflow import Workflow as WFRow
 from models.workflow_version import WorkflowVersion
-from schemas.workflow import TriggerNode, WorkflowDefinition
+from routers.voice import _resolve_by_trigger_slug
+from schemas.healing import HealRequest, SelfHealConfig
 from schemas.workflow import (
     AugmentRequest,
     AugmentResponse,
@@ -36,7 +37,9 @@ from schemas.workflow import (
     NodeSummaryRequest,
     NodeSummaryResponse,
     ReadyResponse,
+    TriggerNode,
     WorkflowCreateBody,
+    WorkflowDefinition,
     WorkflowDetailOut,
     WorkflowListOut,
     WorkflowRenameBody,
@@ -47,6 +50,7 @@ from schemas.workflow import (
     WorkflowVersionOut,
 )
 from services.clarification_service import ClarificationService
+from services.healing_service import HealingService
 from services.workflow_service import WorkflowService
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -67,6 +71,10 @@ def get_workflow_service(
     registry: ToolRegistry = Depends(get_tool_registry),
 ) -> WorkflowService:
     return WorkflowService(get_settings(), clarification_service=clarification, tool_registry=registry)
+
+
+def get_healing_service() -> HealingService:
+    return HealingService(get_settings())
 
 
 def _sse_pack(obj: dict[str, Any]) -> str:
@@ -345,6 +353,122 @@ async def augment_workflow_route(
 
 
 @router.post(
+    "/{workflow_id}/heal",
+    dependencies=[require_permission(Permission.WORKFLOW_CREATE)],
+)
+async def heal_workflow_route(
+    workflow_id: UUID,
+    body: HealRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    wf_service: WorkflowService = Depends(get_workflow_service),
+    heal_service: HealingService = Depends(get_healing_service),
+) -> StreamingResponse:
+    """Diagnose the workflow and stream findings + a proposed, engine-validated
+    patch over SSE. STOPS at the propose gate — nothing is written. The caller
+    applies an accepted patch via the normal ``PUT /workflows/{id}`` save.
+
+    Heal produces a draft-class change, so it is gated on ``WORKFLOW_CREATE``.
+    """
+    # Membership gate (audit finding J): 404 if the caller can't access it.
+    if await wf_service.get_detail(db, user=user, workflow_id=workflow_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    base_gen = heal_service.heal(
+        db,
+        workflow_id,
+        complaint=body.complaint or None,
+        triggered_by="chat",
+        selected_finding_ids=body.selected_finding_ids,
+        simulate=body.simulate,
+    )
+
+    async def event_stream() -> Any:
+        # Headers are already flushed once streaming starts, so any error the
+        # heal pipeline raises mid-stream must be delivered as a terminal SSE
+        # event rather than silently truncating the stream.
+        merged = _merge_heartbeat_stream(base_gen)
+        try:
+            async for evt in merged:
+                yield _sse_pack(evt)
+        except Exception as exc:  # noqa: BLE001 — surface as a clean stream end
+            yield _sse_pack({"type": "error", "content": str(exc)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/{workflow_id}/incidents",
+    dependencies=[require_permission(Permission.WORKFLOW_READ)],
+)
+async def workflow_incidents_route(
+    workflow_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    wf_service: WorkflowService = Depends(get_workflow_service),
+    heal_service: HealingService = Depends(get_healing_service),
+) -> JSONResponse:
+    """Recent heal incidents (audit trail) for a workflow."""
+    if await wf_service.get_detail(db, user=user, workflow_id=workflow_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    incidents = await heal_service.list_incidents(workflow_id)
+    return JSONResponse({"incidents": incidents})
+
+
+class RollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_version: int = Field(ge=1)
+
+
+@router.post(
+    "/{workflow_id}/rollback",
+    dependencies=[require_permission(Permission.WORKFLOW_CREATE)],
+    response_model=WorkflowSummaryOut,
+)
+async def rollback_workflow_route(
+    workflow_id: UUID,
+    body: RollbackRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowSummaryOut:
+    """Restore a prior version's definition as a new draft version (the caller
+    re-runs and re-publishes to take it live)."""
+    row = await service.rollback_workflow(
+        db, user=user, workflow_id=workflow_id, target_version=body.target_version
+    )
+    return WorkflowSummaryOut.model_validate(row)
+
+
+@router.put(
+    "/{workflow_id}/self-heal",
+    dependencies=[require_permission(Permission.WORKFLOW_CREATE)],
+    response_model=WorkflowSummaryOut,
+)
+async def set_self_heal_route(
+    workflow_id: UUID,
+    body: SelfHealConfig,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowSummaryOut:
+    """Set the workflow's autonomous self-heal policy (does not version)."""
+    row = await service.set_self_heal(
+        db, user=user, workflow_id=workflow_id, config=body.model_dump()
+    )
+    return WorkflowSummaryOut.model_validate(row)
+
+
+@router.post(
     "/{workflow_id}/nodes/{node_id}/summary",
     dependencies=[require_permission(Permission.WORKFLOW_READ)],
     response_model=NodeSummaryResponse,
@@ -555,7 +679,7 @@ async def resume_webhook_route(
     Unauthenticated by design — the token (192-bit, generated at park time)
     is the capability. Tokens expire with the node's configured timeout.
     """
-    from agents.extended_executor import _resume_token_key, _resume_payload_key
+    from agents.extended_executor import _resume_payload_key, _resume_token_key
     from core.redis import get_redis
 
     redis = get_redis()
@@ -760,6 +884,7 @@ async def webhook_trigger_route(
     slug: str,
     request: Request,
     payload: dict[str, Any] = Body(default_factory=dict),
+    ctx: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     service: WorkflowService = Depends(get_workflow_service),
 ) -> JSONResponse:
@@ -769,6 +894,10 @@ async def webhook_trigger_route(
     downstream actions / RAG / connections. Returns the aggregated outputs
     synchronously — fine for demos and most external integrations; long-running
     flows can switch to ``/execute`` via SSE.
+
+    ``ctx`` (P7′) is an optional signed token from an email link; its decoded
+    context (e.g. ``candidate_id``) is merged into the execution input beneath
+    the posted body, so triggers can trust who the request is about.
     """
     row, wd = await _load_workflow_for_webhook(db, workflow_id)
 
@@ -802,11 +931,22 @@ async def webhook_trigger_route(
     error: str | None = None
     events: list[dict[str, Any]] = []
 
+    merged_input = dict(payload or {})
+    if ctx:
+        signed = verify_trigger_context(ctx)
+        if signed is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired link context",
+            )
+        # Posted body wins over signed context on key collision.
+        merged_input = {**signed, **merged_input}
+
     async for evt in service.execute_workflow(
         db,
         user=owner,
         workflow_id=workflow_id,
-        request_input=dict(payload or {}),
+        request_input=merged_input,
         variables={},
         demo=False,
     ):
@@ -847,3 +987,150 @@ async def webhook_trigger_route(
             "events": events,
         },
     )
+
+
+@router.get("/{workflow_id}/link/{slug}", include_in_schema=True)
+async def trigger_link_route(
+    workflow_id: UUID,
+    slug: str,
+    ctx: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> HTMLResponse:
+    """One-click email-link entry (P7′): a GET a human clicks from an email
+    (recruiter approve/reject, candidate confirm). The signed ``ctx`` token is
+    verified and injected as the execution input; the workflow runs as its
+    owner. Returns a small confirmation page. Suitable only for short,
+    idempotent workflows — the caller's link encodes the intended action.
+    """
+    context = verify_trigger_context(ctx)
+    if context is None:
+        return HTMLResponse(
+            "<h3>This link is invalid or has expired.</h3>",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    row, wd = await _load_workflow_for_webhook(db, workflow_id)
+    trigger = _find_trigger_by_slug(wd, slug)
+    if trigger is None or trigger.trigger_type not in ("webhook", "form"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="no trigger matches this slug",
+        )
+    owner = (
+        await db.execute(select(User).where(User.id == row.created_by))
+    ).scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="workflow owner no longer exists",
+        )
+
+    error: str | None = None
+    async for evt in service.execute_workflow(
+        db,
+        user=owner,
+        workflow_id=workflow_id,
+        request_input=dict(context),
+        variables={},
+        demo=False,
+    ):
+        if evt.get("type") == "error":
+            error = str(evt.get("message") or "workflow failed")
+
+    if error:
+        return HTMLResponse(
+            f"<h3>Sorry — something went wrong.</h3><p>{error}</p>",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return HTMLResponse("<h3>Thanks — your response has been recorded.</h3>")
+
+
+async def _run_by_signed_slug(
+    db: AsyncSession,
+    service: WorkflowService,
+    *,
+    trigger_slug: str,
+    ctx_token: str,
+    extra_input: dict[str, Any],
+) -> tuple[WFRow, str | None]:
+    """Verify a signed link, resolve the sibling workflow by (workspace-in-token,
+    trigger slug), and run it as its owner. Returns (workflow_row, error)."""
+    context = verify_trigger_context(ctx_token)
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid or expired link",
+        )
+    ws = context.get("__ws__")
+    if not ws:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="link missing workspace"
+        )
+    wf = await _resolve_by_trigger_slug(db, UUID(str(ws)), trigger_slug)
+    if wf is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"no published workflow with trigger '{trigger_slug}'",
+        )
+    owner = (
+        await db.execute(select(User).where(User.id == wf.created_by))
+    ).scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="workflow owner no longer exists",
+        )
+    merged = {k: v for k, v in context.items() if k != "__ws__"}
+    merged.update(extra_input or {})
+    error: str | None = None
+    async for evt in service.execute_workflow(
+        db, user=owner, workflow_id=wf.id, request_input=merged, variables={}, demo=False
+    ):
+        if evt.get("type") == "error":
+            error = str(evt.get("message") or "workflow failed")
+    return wf, error
+
+
+@router.post("/slug/{trigger_slug}", include_in_schema=True)
+async def slug_trigger_post(
+    trigger_slug: str,
+    ctx: str = Query(...),
+    payload: dict[str, Any] = Body(default_factory=dict),
+    db: AsyncSession = Depends(get_db),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> JSONResponse:
+    """Fire a workflow addressed by its webhook-trigger slug (id-free). The
+    signed ``ctx`` carries the workspace + candidate context; the posted body
+    (e.g. slot + language from a form) is merged on top. Used for the candidate
+    slot submission."""
+    wf, error = await _run_by_signed_slug(
+        db, service, trigger_slug=trigger_slug, ctx_token=ctx, extra_input=dict(payload or {})
+    )
+    return JSONResponse(
+        {"workflow_id": str(wf.id), "status": "error" if error else "ok", "error": error},
+        status_code=(
+            status.HTTP_500_INTERNAL_SERVER_ERROR if error else status.HTTP_200_OK
+        ),
+    )
+
+
+@router.get("/slug/{trigger_slug}", include_in_schema=True)
+async def slug_trigger_get(
+    trigger_slug: str,
+    ctx: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    service: WorkflowService = Depends(get_workflow_service),
+) -> HTMLResponse:
+    """One-click email-link variant of the slug trigger (recruiter approve/reject)."""
+    try:
+        _wf, error = await _run_by_signed_slug(
+            db, service, trigger_slug=trigger_slug, ctx_token=ctx, extra_input={}
+        )
+    except HTTPException as exc:
+        return HTMLResponse(f"<h3>{exc.detail}</h3>", status_code=exc.status_code)
+    if error:
+        return HTMLResponse(
+            f"<h3>Sorry — something went wrong.</h3><p>{error}</p>",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return HTMLResponse("<h3>Thanks — your response has been recorded.</h3>")

@@ -952,6 +952,43 @@ _CATALOG: tuple[NativeProvider, ...] = (
         build_tool=_http_bearer_tool,
     ),
     NativeProvider(
+        id="ats",
+        name="ATS / Résumé Source",
+        category="custom",
+        description=(
+            "Applicant-tracking / HRIS résumé source for the recruitment "
+            "templates. A bearer-auth REST connector: point ``base_url`` at your "
+            "ATS's candidate-search endpoint. The ``ats_search_candidates`` "
+            "action POSTs ``{jd, role, limit}`` and MUST return a JSON list (or "
+            "``{data: [...]}``) of candidates with at least "
+            "``candidate_id, name, email, phone``. In draft/demo runs a sample "
+            "shortlist is returned so the pipeline is testable without a live ATS."
+        ),
+        auth_type="api_key",
+        fields=(
+            ProviderField(
+                key="base_url",
+                label="ATS search endpoint",
+                type="url",
+                required=True,
+                placeholder="https://yourcompany.example.com/api/candidates/search",
+            ),
+            ProviderField(
+                key="token",
+                label="Bearer token",
+                type="secret",
+                required=False,
+                placeholder="paste your ATS API token",
+            ),
+        ),
+        tool_slugs=("ats_search_candidates",),
+        icon="users",
+        docs_url=None,
+        build_connection=_http_bearer_conn,
+        probe=_probe_http_bearer,
+        build_tool=_http_bearer_tool,
+    ),
+    NativeProvider(
         id="postgres",
         name="PostgreSQL",
         category="database",

@@ -28,6 +28,9 @@ asyncpg = "^0.29"
 # Sync Postgres driver for Alembic (env.py rewrites +asyncpg → +psycopg2 at migration time).
 psycopg2-binary = "^2.9"
 redis = { extras = ["hiredis"], version = ">=5.2.1,<8.0.0" }
+# Background worker + cron (self-heal monitor, schedule dispatcher). Redis-backed.
+arq = "^0.26"
+croniter = "^3.0"
 pydantic = "^2.7"
 pydantic-settings = "^2.0"
 python-jose = { extras = ["cryptography"], version = "^3.3" }

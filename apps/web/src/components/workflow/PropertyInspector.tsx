@@ -746,6 +746,22 @@ function ActionFields({
           className={inputClasses}
         />
       </Field>
+      <Field
+        label="On error"
+        hint="fail: stop the run. continue: skip this node. route: set a 'failed' decision so an error branch (activate_on) can run."
+      >
+        <select
+          value={node.on_error ?? "fail"}
+          onChange={(e) =>
+            onPatch({ on_error: e.target.value as ActionNode["on_error"] })
+          }
+          className={inputClasses}
+        >
+          <option value="fail">Fail (abort run)</option>
+          <option value="continue">Continue (skip node)</option>
+          <option value="route">Route (error branch)</option>
+        </select>
+      </Field>
       <Checkbox
         label="Allow dry-run if no connection"
         checked={node.allow_dry_run}

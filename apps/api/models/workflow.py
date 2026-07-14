@@ -10,12 +10,15 @@ from uuid import UUID
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Integer,
     String,
     UniqueConstraint,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -89,6 +92,11 @@ class Workflow(UUIDPKMixin, TimestampMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Per-workflow self-heal policy (Phase 3). Null = never auto-healed. Shape:
+    # ``{"enabled": bool, "policy": "off"|"safe"|"autonomous", "cooldown_seconds": int}``
+    # Operational config, so it lives on the workflow row (not the versioned
+    # definition) — toggling it must not create a new version.
+    self_heal: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     workspace: Mapped["Workspace"] = relationship()
     creator: Mapped["User"] = relationship()
