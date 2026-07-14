@@ -607,6 +607,65 @@ def _ats_demo_stub(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _gmail_send_native(params: dict[str, Any], *, access_token: str) -> dict[str, Any]:
+    """Send an email via the Gmail REST API using a native OAuth connection.
+
+    Builds an RFC-822 MIME message and POSTs it to ``users/me/messages/send``.
+    Used when a native ``gmail`` connection exists, instead of the Composio
+    meta-tool. Accepts ``to``/``recipient_email``, ``cc``, ``bcc``, ``subject``
+    and an HTML body (``html_body``/``html``) or plain body (``body``/``text``).
+    """
+    import base64
+    from email.mime.text import MIMEText
+
+    import httpx
+
+    p = params or {}
+    to = str(p.get("to") or p.get("recipient_email") or "").strip()
+    cc = str(p.get("cc") or "").strip()
+    bcc = str(p.get("bcc") or "").strip()
+    subject = str(p.get("subject") or "").strip()
+    html = p.get("html_body") or p.get("html")
+    if html:
+        mime = MIMEText(str(html), "html", "utf-8")
+    else:
+        mime = MIMEText(str(p.get("body") or p.get("text") or ""), "plain", "utf-8")
+    if to:
+        mime["To"] = to
+    if cc:
+        mime["Cc"] = cc
+    if bcc:
+        mime["Bcc"] = bcc
+    mime["Subject"] = subject
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"raw": raw},
+        )
+    if resp.status_code >= 400:
+        raise ActionInvocationError(
+            f"gmail.gmail_send HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+    sent = resp.json() if resp.content else {}
+    return {
+        "__provider__": "gmail",
+        "__action__": "gmail_send",
+        "__dry_run__": False,
+        "data": {
+            "id": sent.get("id"),
+            "threadId": sent.get("threadId"),
+            "to": to,
+            "subject": subject,
+        },
+    }
+
+
 def _sign_link(params: dict[str, Any], *, workspace_id: UUID | None = None) -> dict[str, Any]:
     """Build a signed trigger link. ``params``:
       * ``context`` — dict baked into the signed token (e.g. candidate_id).
@@ -1067,6 +1126,46 @@ async def invoke_action(
         }
 
     # ------------------------------------------------------------------
+    # Native Gmail send: when a native ``gmail`` connection is configured, send
+    # via the Gmail REST API directly (MIME -> messages/send) rather than the
+    # Composio meta-tool. Only on a live run — the publish gate above returns a
+    # preview for drafts. Falls through to MCP/Composio when no native gmail
+    # connection exists.
+    # ------------------------------------------------------------------
+    if live and slug == "gmail_send":
+        gmail_conn = next(
+            (
+                c for c in workspace_connections
+                if c.provider == "gmail"
+                and c.status == NativeConnectionStatus.ACTIVE
+            ),
+            None,
+        )
+        if gmail_conn is not None:
+            creds = decode_config(gmail_conn)
+            # OAuth access tokens expire (~1h); refresh in-memory before sending
+            # when a refresh_token is present. Best-effort — fall back to the
+            # stored token if refresh isn't possible.
+            try:
+                from services.oauth2_service import (
+                    get_oauth_provider,
+                    refresh_token_if_needed,
+                )
+
+                oauth_prov = get_oauth_provider("gmail")
+                if oauth_prov is not None:
+                    refreshed = await refresh_token_if_needed(oauth_prov, creds)
+                    if refreshed:
+                        creds = refreshed
+            except Exception:  # noqa: BLE001 — refresh is best-effort
+                log.warning("action_runner.gmail.refresh_failed", exc_info=True)
+            token = str(creds.get("access_token") or "").strip()
+            if token:
+                return await asyncio.to_thread(
+                    _gmail_send_native, params or {}, access_token=token
+                )
+
+    # ------------------------------------------------------------------
     # Pre-flight: resolve any name-shaped param values (e.g.
     # ``spreadsheet_id: "ICICI Lombard Motor Renewal"``) into real IDs via
     # Composio Drive/Slack/Gmail lookups. Transparent to the action node
@@ -1084,22 +1183,34 @@ async def invoke_action(
             registries=registries,
         )
 
-    # ------------------------------------------------------------------
-    # Path A — MCP (preferred when configured). Talks the MCP wire
-    # protocol directly, bypassing the broken legacy ToolSet SDK shim.
-    # Tries each workspace-registered server first, then falls back to the
-    # env-configured endpoint.
-    # ------------------------------------------------------------------
-    mcp_result = await _try_invoke_via_mcp(
-        provider_id=provider_id,
-        action_slug=action_slug,
-        params=params,
-        registries=registries,
+    # Prefer an explicitly-configured native connection over Composio/MCP.
+    # Composio's fuzzy tool-matching can mis-route (e.g. ats_search_candidates ->
+    # ASHBY_SEARCH_CANDIDATES) and requires a tool-router session we don't open,
+    # so when the workspace has an active native connection for this provider we
+    # skip Composio entirely and use the native path (Path B) below.
+    native_prov = get_provider(provider_id) or resolve_provider_for_slug(action_slug)
+    has_native_conn = native_prov is not None and any(
+        c.provider == native_prov.id and c.status == NativeConnectionStatus.ACTIVE
+        for c in workspace_connections
     )
-    if mcp_result is not None:
-        if resolved_log:
-            mcp_result["__resolved_params__"] = resolved_log
-        return mcp_result
+
+    # ------------------------------------------------------------------
+    # Path A — MCP/Composio (only when no native connection is configured).
+    # Talks the MCP wire protocol directly, bypassing the broken legacy
+    # ToolSet SDK shim. Tries each workspace-registered server first, then
+    # falls back to the env-configured endpoint.
+    # ------------------------------------------------------------------
+    if not has_native_conn:
+        mcp_result = await _try_invoke_via_mcp(
+            provider_id=provider_id,
+            action_slug=action_slug,
+            params=params,
+            registries=registries,
+        )
+        if mcp_result is not None:
+            if resolved_log:
+                mcp_result["__resolved_params__"] = resolved_log
+            return mcp_result
 
     provider = get_provider(provider_id) or resolve_provider_for_slug(action_slug)
     if provider is None:
