@@ -977,11 +977,16 @@ class ExtendedWorkflowExecutor:
                 # The trigger payload is whatever ``input_data`` was at
                 # workflow entry. We surface it as the node's output so
                 # downstream nodes can ``{{ trigger.foo }}`` into it.
-                payload = (
-                    input_data.get("input")
-                    if isinstance(input_data, dict)
-                    else input_data
-                )
+                # Prefer an explicit ``input`` field (chat/manual text runs);
+                # otherwise expose the WHOLE request dict (webhook/slug/form
+                # triggers post a flat dict like {candidate_id, email, ...}) so
+                # ``{{ start.<field> }}`` resolves against it instead of {}.
+                if isinstance(input_data, dict):
+                    payload = input_data.get("input")
+                    if payload is None:
+                        payload = input_data
+                else:
+                    payload = input_data
                 if isinstance(payload, str):
                     parsed = _maybe_json(payload)
                     payload = parsed if parsed is not None else payload
