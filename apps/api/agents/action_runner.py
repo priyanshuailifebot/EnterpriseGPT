@@ -172,10 +172,19 @@ async def _try_invoke_via_mcp(
                     params=params or {},
                 )
             except MCPToolError as exc:
-                raise ActionInvocationError(
-                    f"Composio meta-tool routing failed for "
-                    f"{provider_id}.{target_slug}: {exc}"
-                ) from exc
+                # Composio couldn't route/execute (e.g. the tool-router session
+                # isn't available, or no matching tool). Don't hard-fail the
+                # action — fall through to the native provider path below, which
+                # uses a configured native connection or a clean dry-run when
+                # unconnected. Prevents a misconfigured Composio from aborting
+                # every action it can't handle.
+                log.warning(
+                    "action_runner.composio_meta.routing_failed_fallback",
+                    provider=provider_id,
+                    action=target_slug,
+                    error=str(exc)[:200],
+                )
+                return None
 
     return None
 
