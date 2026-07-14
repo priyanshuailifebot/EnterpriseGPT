@@ -136,6 +136,45 @@ def _to_text(val: Any) -> str:
         return str(val)
 
 
+def _extract_agent_output(res: Any, node_id: str) -> str | None:
+    """Pull the agent's text out of a Dynamiq workflow result.
+
+    Dynamiq keys the finalized result by its *internal* node ids (uuids), not
+    our workflow ``node_id``, and wraps each cell as ``{"output": {"content":
+    ...}}`` (sometimes just ``{"content": ...}`` or a bare string). A rigid
+    ``res[node_id]["output"]["content"]`` lookup therefore misses and yields an
+    empty agent output. Prefer an exact node-id match, then fall back to the
+    first cell that actually carries content.
+    """
+    if isinstance(res, str):
+        return res or None
+
+    def _cell_content(cell: Any) -> str | None:
+        if isinstance(cell, str):
+            return cell if cell.strip() else None
+        if isinstance(cell, dict):
+            out = cell.get("output", cell)
+            if isinstance(out, dict):
+                for k in ("content", "text", "result", "answer", "output"):
+                    v = out.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v
+            elif isinstance(out, str) and out.strip():
+                return out
+        return None
+
+    if isinstance(res, dict):
+        if node_id in res:
+            hit = _cell_content(res[node_id])
+            if hit:
+                return hit
+        for cell in res.values():
+            hit = _cell_content(cell)
+            if hit:
+                return hit
+    return None
+
+
 def _extract_upstream_text(val: Any) -> str:
     """Pull human-readable text from an upstream node output.
 
@@ -1427,17 +1466,11 @@ class ExtendedWorkflowExecutor:
         async for ev in self._dynamiq.run_workflow_stream(wf, input_data=node_input):
             if ev.get("type") == "workflow_complete":
                 # Extract the agent's content from the final Dynamiq payload.
-                res = ev.get("result")
-                if isinstance(res, dict):
-                    cell = res.get(node.id)
-                    if isinstance(cell, dict):
-                        inner = cell.get("output")
-                        if isinstance(inner, dict):
-                            cnt = inner.get("content")
-                            if isinstance(cnt, str):
-                                final_text.append(cnt)
-                if not final_text and isinstance(ev.get("result"), str):
-                    final_text.append(ev["result"])
+                # Dynamiq keys the result by internal uuids, not our node.id,
+                # so search robustly rather than a fixed res[node.id] path.
+                content = _extract_agent_output(ev.get("result"), node.id)
+                if content:
+                    final_text.append(content)
                 yield {
                     "type": "agent_complete",
                     "agent_id": node.id,

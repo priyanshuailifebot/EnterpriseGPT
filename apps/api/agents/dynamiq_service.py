@@ -14,6 +14,7 @@ from dynamiq.connections.connections import Anthropic as AnthropicConn
 from dynamiq.connections.connections import AzureAI as AzureAIConn
 from dynamiq.flows import Flow
 from dynamiq.nodes.agents import Agent
+from dynamiq.nodes.types import Behavior
 from dynamiq.nodes.llms import Anthropic, AzureAI as AzureAILLM
 from dynamiq.nodes.node import InputTransformer, NodeDependency
 from dynamiq.runnables import RunnableConfig, RunnableResult, RunnableStatus
@@ -358,6 +359,11 @@ class DynamiqService:
             # the loop has no actions to take and otherwise burns its budget
             # rejecting the agent's own text, returning empty. See hydrate_workflow.
             max_loops=12 if bridge_tools else 2,
+            # A tool-less agent can't loop fewer than 2 times (ge=2) and its
+            # plain/JSON answer isn't a parseable ReAct action, so the default
+            # RAISE behaviour loop-fails and returns empty. RETURN makes it hand
+            # back the agent's actual completion — the single-shot answer we want.
+            behaviour_on_max_loops=(Behavior.RAISE if bridge_tools else Behavior.RETURN),
             input_transformer=InputTransformer(selector={"input": "$.input"}),
             streaming=StreamingConfig(enabled=True, mode=StreamingMode.ALL),
         )
