@@ -211,6 +211,23 @@ async def list_workflows_route(
     )
 
 
+@router.get("/templates", status_code=status.HTTP_200_OK)
+async def list_templates_route(
+    user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    """Curated workflow templates the user can one-click into their workspace.
+
+    Registered BEFORE ``/{workflow_id}`` so the literal ``templates`` path is
+    not captured as a workflow id. Public to any authenticated user — templates
+    are read-only and contain no secrets. Each entry includes the original NL
+    ``prompt`` and a fully-baked v2 ``definition`` saveable via ``POST /workflows``.
+    """
+    from services.workflow_templates import public_catalog
+
+    _ = user
+    return {"templates": public_catalog()}
+
+
 @router.get(
     "/{workflow_id}",
     dependencies=[require_permission(Permission.WORKFLOW_READ)],
@@ -634,23 +651,6 @@ async def approve_hitl_route(
         feedback=body.feedback,
     )
     return {"detail": "approval recorded"}
-
-
-@router.get("/templates", status_code=status.HTTP_200_OK)
-async def list_templates_route(
-    user: User = Depends(get_current_active_user),
-) -> dict[str, Any]:
-    """Curated workflow templates the user can one-click into their workspace.
-
-    Public to any authenticated user — templates are read-only and contain no
-    secrets. Each entry includes the original NL ``prompt`` (so users who
-    want a deeper customise step can pipe it through ``/interpret``) and a
-    fully-baked v2 ``definition`` they can save as-is via ``POST /workflows``.
-    """
-    from services.workflow_templates import public_catalog
-
-    _ = user
-    return {"templates": public_catalog()}
 
 
 class WebhookResumeBody(BaseModel):
