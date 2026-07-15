@@ -697,8 +697,16 @@ class ExtendedWorkflowExecutor:
         workflow_id: UUID | None = None,
         workspace_connections: list[Any] | None = None,
         live: bool = True,
+        pii_service: Any | None = None,
+        pii_token_map: dict[str, Any] | None = None,
     ) -> None:
         self._settings = settings or get_settings()
+        # PII restore: the service redacts the trigger input so AGENTS never see
+        # raw PII, but side-effecting actions (e.g. an email ``to:``) need the
+        # real value. We restore PII on rendered action params / data_store
+        # payloads just before they execute, keeping agent inputs redacted.
+        self._pii_service = pii_service
+        self._pii_token_map = pii_token_map or {}
         self._dynamiq = dynamiq or DynamiqService(self._settings)
         # Pluggable for tests; defaults to a real LLM call via Dynamiq.
         self._condition_eval = condition_eval or self._llm_route
@@ -713,6 +721,25 @@ class ExtendedWorkflowExecutor:
         # Publish-gate: when False, side-effecting actions are previewed, never
         # executed. Set by the service from workflow status + run mode.
         self._live = live
+
+    def _restore_pii(self, value: Any) -> Any:
+        """Restore redacted PII tokens (e.g. ``<<PII_EMAIL_x>>``) in a rendered
+        action param / data_store payload. No-op when PII wasn't redacted."""
+        if not self._pii_service or not self._pii_token_map:
+            return value
+        tm = self._pii_token_map
+        restore = self._pii_service.restore
+
+        def walk(v: Any) -> Any:
+            if isinstance(v, str):
+                return restore(v, tm)
+            if isinstance(v, list):
+                return [walk(i) for i in v]
+            if isinstance(v, dict):
+                return {k: walk(x) for k, x in v.items()}
+            return v
+
+        return walk(value)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -1154,7 +1181,7 @@ class ExtendedWorkflowExecutor:
                 }
 
             elif isinstance(node, DataStoreNode):
-                rendered_payload = render_placeholders(node.payload, outputs)
+                rendered_payload = self._restore_pii(render_placeholders(node.payload, outputs))
                 rendered_key = render_placeholders(node.key, outputs) or None
                 rendered_filter = render_placeholders(node.filter, outputs)
                 node_logger.info(
@@ -1826,7 +1853,7 @@ class ExtendedWorkflowExecutor:
         without writing code. Result is always a dict — downstream nodes
         JSONPath into ``data`` for the real response.
         """
-        rendered_params = render_placeholders(node.params, outputs)
+        rendered_params = self._restore_pii(render_placeholders(node.params, outputs))
         yield {
             "type": "action_invoked",
             "node_id": node.id,

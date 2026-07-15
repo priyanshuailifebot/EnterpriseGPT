@@ -337,36 +337,48 @@ HR_INTERVIEW = WorkflowDefinition(
             table="interview_plans",
             key="{{ start.role_title }}",
         ),
-        # One LLM step: pick ladder[round_index], then generate that round's
-        # questions + rubric from the JD and the round's type/focus.
-        AgentNode(
-            id="prep_round",
-            name="Prepare Round (select + questions)",
+        # Deterministically select ladder[round_index] (pure function, no LLM)
+        # so the round's mode/name are always reliable structured values.
+        ActionNode(
+            id="pick_round",
+            name="Select Current Round",
             depends_on=["read_plan", "start"],
+            provider="internal",
+            action_slug="hr_pick_round",
+            params={
+                "ladder": "{{ read_plan.row.ladder }}",
+                "round_index": "{{ start.round_index }}",
+            },
+        ),
+        # LLM generates this round's questions from the JD + round type/focus.
+        # Output is prose (interviewer-facing) — consumed as free text, so it
+        # never depends on strict JSON.
+        AgentNode(
+            id="gen_q",
+            name="Generate Round Questions",
+            depends_on=["pick_round", "read_plan"],
             role=_QUESTION_ROLE,
             instructions=(
-                "The input contains a stored plan with a JSON `ladder` (array of "
-                "rounds) and a `jd_text`, plus a `round_index` integer. STEP 1: "
-                "select the round at ladder[round_index] (0-based). STEP 2: "
+                "The input contains the job description (`jd_text`) and the "
+                "current interview round (name, type, focus). "
                 + _QUESTION_INSTR
-                + " Return STRICT JSON and nothing else combining both: "
-                '{"round": {"name": str, "type": str, "mode": str, "focus": str}, '
-                '"questions": [str,...], "rubric": [str,...]}. Copy the round\'s '
-                "mode verbatim from the ladder (it decides AI vs human handling)."
+                + " Present the questions as a clean numbered list followed by a "
+                "short 'Scoring rubric:' list — readable prose an interviewer can "
+                "use directly."
             ),
         ),
         # mode gate: AI voice round vs human interviewer round.
         IfNode(
             id="is_ai",
             name="AI round?",
-            depends_on=["prep_round"],
-            expression="$.prep_round.round.mode == 'ai'",
+            depends_on=["pick_round"],
+            expression="$.pick_round.data.mode == 'ai'",
         ),
         # ---- AI branch: place the voice interview with THIS round's questions ----
         ActionNode(
             id="start_call",
             name="Place Interview Call (Retell)",
-            depends_on=["is_ai", "prep_round"],
+            depends_on=["is_ai", "gen_q"],
             activate_on={"is_ai": "true"},
             provider="mcp",
             action_slug="start_interview",
@@ -375,9 +387,8 @@ HR_INTERVIEW = WorkflowDefinition(
                 "phone": "{{ start.phone }}",
                 "language": "{{ start.language }}",
                 "jd_summary": "{{ read_plan.row.jd_text }}",
-                "round": "{{ prep_round.round.name }}",
-                "questions": "{{ prep_round.questions }}",
-                "rubric": "{{ prep_round.rubric }}",
+                "round": "{{ pick_round.data.name }}",
+                "questions": "{{ gen_q }}",
             },
         ),
         ActionNode(
@@ -410,8 +421,8 @@ HR_INTERVIEW = WorkflowDefinition(
                     "phone": "{{ start.phone }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": "{{ start.round_index }}",
-                    "round_name": "{{ prep_round.round.name }}",
-                    "round_focus": "{{ prep_round.round.focus }}",
+                    "round_name": "{{ pick_round.data.name }}",
+                    "round_focus": "{{ pick_round.data.focus }}",
                     "mode": "ai",
                 },
             },
@@ -430,7 +441,7 @@ HR_INTERVIEW = WorkflowDefinition(
                 "attendees": ["{{ start.email }}"],
                 "start": "{{ start.slot_iso }}",
                 "duration_minutes": 45,
-                "summary": "{{ prep_round.round.name }} — {{ start.role_title }} ({{ start.name }})",
+                "summary": "{{ pick_round.data.name }} — {{ start.role_title }} ({{ start.name }})",
             },
         ),
         ActionNode(
@@ -450,8 +461,8 @@ HR_INTERVIEW = WorkflowDefinition(
                     "phone": "{{ start.phone }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": "{{ start.round_index }}",
-                    "round_name": "{{ prep_round.round.name }}",
-                    "round_focus": "{{ prep_round.round.focus }}",
+                    "round_name": "{{ pick_round.data.name }}",
+                    "round_focus": "{{ pick_round.data.focus }}",
                     "purpose": "feedback",
                 },
             },
@@ -459,20 +470,24 @@ HR_INTERVIEW = WorkflowDefinition(
         ActionNode(
             id="email_brief",
             name="Email Interviewer Brief",
-            depends_on=["book_human", "sign_feedback", "prep_round"],
+            # Gated to the human branch via sign_feedback (is_ai=false); NOT
+            # dependent on book_human succeeding — a missing calendar connection
+            # must not suppress the interviewer's brief + feedback link.
+            depends_on=["sign_feedback", "gen_q"],
+            activate_on={"is_ai": "false"},
             provider="gmail",
             action_slug="gmail_send",
             params={
                 "to": "hiring-team@example.com",
-                "subject": "Interview brief: {{ start.name }} — {{ prep_round.round.name }}",
+                "subject": "Interview brief: {{ start.name }} — {{ pick_round.data.name }}",
                 "html_body": (
                     '<div style="font-family:Arial,sans-serif;font-size:14px;'
                     'color:#1a2233;line-height:1.6"><p>You have an upcoming '
-                    "<b>{{ prep_round.round.name }}</b> interview with "
+                    "<b>{{ pick_round.data.name }}</b> interview with "
                     "<b>{{ start.name }}</b> for <b>{{ start.role_title }}</b>.</p>"
-                    "<p><b>Focus:</b> {{ prep_round.round.focus }}</p>"
+                    "<p><b>Focus:</b> {{ pick_round.data.focus }}</p>"
                     "<p><b>Suggested questions:</b></p>"
-                    "<p>{{ prep_round.questions }}</p>"
+                    "<p>{{ gen_q }}</p>"
                     "<p style=\"margin-top:16px\">After the interview, submit your "
                     'assessment here: <a href="{{ sign_feedback.data.url }}" '
                     'style="background:#2563EB;color:#fff;padding:9px 16px;'
@@ -668,18 +683,23 @@ HR_DECISION = WorkflowDefinition(
             table="interview_plans",
             key="{{ start.role_title }}",
         ),
-        AgentNode(
+        ActionNode(
             id="advance",
             name="Advance Ladder",
             depends_on=["read_plan", "start"],
-            role=_ADVANCE_ROLE,
-            instructions=_ADVANCE_INSTR,
+            activate_on={"is_approved": "true"},
+            provider="internal",
+            action_slug="hr_advance",
+            params={
+                "ladder": "{{ read_plan.row.ladder }}",
+                "round_index": "{{ start.round_index }}",
+            },
         ),
         IfNode(
             id="has_next",
             name="Another round?",
             depends_on=["advance"],
-            expression="$.advance.has_next == true",
+            expression="$.advance.data.has_next == true",
         ),
         # --- Next round exists: invite the candidate to book it (loop) ---
         ActionNode(
@@ -698,7 +718,7 @@ HR_DECISION = WorkflowDefinition(
                     "email": "{{ start.email }}",
                     "phone": "{{ start.phone }}",
                     "role_title": "{{ start.role_title }}",
-                    "round_index": "{{ advance.next_index }}",
+                    "round_index": "{{ advance.data.next_index }}",
                     "purpose": "slot",
                 },
             },
@@ -711,12 +731,12 @@ HR_DECISION = WorkflowDefinition(
             action_slug="gmail_send",
             params={
                 "to": "{{ start.email }}",
-                "subject": "You're moving forward — {{ advance.next_name }} ({{ start.role_title }})",
+                "subject": "You're moving forward — {{ advance.data.next_name }} ({{ start.role_title }})",
                 "html_body": (
                     '<div style="font-family:Arial,sans-serif;font-size:14px;'
                     'color:#1a2233;line-height:1.6"><p>Hi {{ start.name }},</p>'
                     "<p>Great news — you've advanced to the next round: "
-                    "<b>{{ advance.next_name }}</b>. Please pick a time here: "
+                    "<b>{{ advance.data.next_name }}</b>. Please pick a time here: "
                     '<a href="{{ sign_next.data.url }}">choose a slot</a></p>'
                     "<p>Warm regards,<br>The Talent Team</p></div>"
                 ),
@@ -731,8 +751,8 @@ HR_DECISION = WorkflowDefinition(
             key="{{ start.candidate_id }}",
             payload={
                 "status": "advanced",
-                "current_round_index": "{{ advance.next_index }}",
-                "current_round_name": "{{ advance.next_name }}",
+                "current_round_index": "{{ advance.data.next_index }}",
+                "current_round_name": "{{ advance.data.next_name }}",
             },
         ),
         # --- Ladder exhausted: extend an offer ---

@@ -1482,6 +1482,8 @@ class WorkflowService:
                     workflow_id=row.id,
                     workspace_connections=native_conns,
                     live=live,
+                    pii_service=self._pii,
+                    pii_token_map=cmap,
                 )
                 graph_summary: Any = None
                 graph_error: str | None = None

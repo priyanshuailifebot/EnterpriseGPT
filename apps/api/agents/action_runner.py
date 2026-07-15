@@ -739,6 +739,60 @@ async def _register_voice_route(
     return {"data": {"registered": True, "call_id": call_id}}
 
 
+def _coerce_rounds(val: Any) -> list[dict[str, Any]]:
+    """Parse a ladder value (JSON string or list) into a list of round dicts."""
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except json.JSONDecodeError:
+            from services.output_parser_service import extract_json_loose
+
+            val = extract_json_loose(val)
+    if isinstance(val, dict) and isinstance(val.get("rounds"), list):
+        val = val["rounds"]
+    return [r for r in val if isinstance(r, dict)] if isinstance(val, list) else []
+
+
+def _coerce_index(val: Any) -> int:
+    try:
+        return int(str(val).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _hr_pick_round(params: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically select ladder[round_index]. Pure function (no LLM) so
+    control-flow (AI/human mode, round name) is always reliably structured."""
+    rounds = _coerce_rounds(params.get("ladder"))
+    idx = _coerce_index(params.get("round_index"))
+    rnd = rounds[idx] if 0 <= idx < len(rounds) else {}
+    return {
+        "data": {
+            "name": rnd.get("name", ""),
+            "type": rnd.get("type", ""),
+            "mode": (rnd.get("mode") or "ai"),
+            "focus": rnd.get("focus", ""),
+            "index": idx,
+            "total": len(rounds),
+        }
+    }
+
+
+def _hr_advance(params: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically compute the next rung of the ladder. Pure function."""
+    rounds = _coerce_rounds(params.get("ladder"))
+    idx = _coerce_index(params.get("round_index"))
+    nxt = idx + 1
+    has_next = 0 <= nxt < len(rounds)
+    return {
+        "data": {
+            "next_index": nxt,
+            "has_next": has_next,
+            "next_name": (rounds[nxt].get("name", "") if has_next else ""),
+        }
+    }
+
+
 def _generate_pdf(params: dict[str, Any]) -> dict[str, Any]:
     """Render markdown/plain text to a PDF payload (base64 envelope)."""
     from services.pdf_service import render_pdf_result
@@ -1047,6 +1101,14 @@ async def invoke_action(
     # plus the candidate context. The Retell callback endpoint reads this back.
     if prov == "internal" and slug == "register_voice_route":
         return await _register_voice_route(params or {}, workspace_id=workspace_id, live=live)
+
+    # internal.hr_pick_round / hr_advance: deterministic ladder helpers (pure
+    # functions, no LLM, no side effects) — run in draft/preview too so the
+    # round-aware recruitment chain has reliable structured control-flow.
+    if prov == "internal" and slug == "hr_pick_round":
+        return _hr_pick_round(params or {})
+    if prov == "internal" and slug == "hr_advance":
+        return _hr_advance(params or {})
 
     # ATS candidate search scaffold: in draft/demo (not live) return a sample
     # shortlist so the recruitment templates run end-to-end without a live ATS.
