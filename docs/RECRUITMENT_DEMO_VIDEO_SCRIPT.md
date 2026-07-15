@@ -16,7 +16,7 @@
 - [ ] Stack up: `docker compose up -d postgres redis api web` (+ `api-worker` only if you'll show schedules).
 - [ ] `.env` has your **LLM key** (Azure OpenAI or Anthropic) — scoring + self-heal need it.
 - [ ] All **six** HR templates instantiated in **one** workspace.
-- [ ] A free **mock ATS** endpoint connected (returns the 2 sample candidates) using `you+alias@` emails.
+- [ ] A free **mock ATS** endpoint connected (returns a ~26-candidate pool of varied-quality résumés) using `you+alias@` emails, so the screening step has something real to filter.
 - [ ] **Gmail connected** so invite/summary/recruiter emails actually send.
 - [ ] One workflow pre-seeded with a **self-heal defect** (see Scene 6) — saved, *not yet healed*.
 - [ ] Tabs ready: workflow editor, `/run` page, your email inbox, a candidate `/hr/slot?ctx=…` link.
@@ -44,7 +44,8 @@
 **On screen:** Open the **Library** / templates list showing the six `hr-*` workflows; hover each.
 
 > "Instead of one giant fragile automation, it's six small workflows, each doing one job and handing
-> off to the next: **Sourcing** finds candidates and invites them; **Start Call** places the AI
+> off to the next: **Sourcing** pulls candidates, an LLM **screens their résumés** against the role
+> and invites only the shortlist; **Start Call** places the AI
 > interview once a candidate picks a time; **Score & Review** grades the conversation; **Decision** is
 > the human approval step; and two background jobs — a **Chaser** that nudges people who haven't
 > booked, and a weekly **Ranking**. Because they're separate and event-driven, one candidate's
@@ -82,8 +83,11 @@ Show the streaming timeline complete. Then switch to your **email inbox** showin
 arrived.
 
 > "Here's what a real run looks like. I give it a role — say, 'Field Sales Advisor' — and run it.
-> It pulls matching candidates from our applicant system and emails each of them a personal interview
-> invitation."
+> It pulls matching candidates from our applicant system — here, twenty-six of them — and then an
+> LLM reads every résumé and scores it against the role on explicit criteria: relevant sales
+> experience, quota track record, local-market and language fit, and so on. Only the ones that clear
+> the bar get invited. Watch — twenty-six candidates in, a shortlist of about seven out, and each of
+> those gets a personal interview invitation. Nobody unqualified is ever contacted."
 
 *(switch to inbox)*
 
@@ -191,7 +195,7 @@ approval condition to reference a field that doesn't exist.)* Click **Diagnose &
 | If you can't… | Do this instead (still looks real) |
 |---|---|
 | Place a real voice call (no Retell) | Narrate "the AI agent runs the call" over Scene 5, then trigger the scoring step with a canned transcript (Guide §5.2). The **LLM scores that transcript for real** and drafts the assessment email — so the recruiter email is genuine even without live voice. |
-| Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1); the run and emails are real. |
+| Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1) — it returns a 26-candidate pool of varied-quality résumés so the LLM screening visibly shortlists ~7. The run, screening, and emails are all real. |
 | Show scheduled jobs (Chaser/Ranking) | Skip — just mention them in Scene 2. They're background jobs and don't film well. |
 | Get self-heal to propose a fix | Make sure the defect is a **prompt** or **condition** flaw, not a missing integration (the healer intentionally won't auto-fix credential issues). |
 

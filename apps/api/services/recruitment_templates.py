@@ -40,6 +40,31 @@ _RUBRIC = [
     "customer_advisor_skills",
 ]
 
+# Résumé-screening shortlist threshold (0-100). Candidates the LLM scores at or
+# above this bar are invited to book a slot; the rest are filtered out before
+# any invite is sent.
+_SCREEN_THRESHOLD = 70
+
+# Explicit, weighted criteria the screening LLM applies to each résumé against
+# the job description. Kept as prose in the agent instructions so it is
+# auditable and easy for a recruiter to tune per role.
+_SCREEN_CRITERIA = (
+    "Screening criteria (weight each, then compute an overall fit_score 0-100):\n"
+    "1. Relevant sales experience (~30%): direct field / B2B / B2C / channel "
+    "sales; more relevant years and clear selling roles score higher. Purely "
+    "non-sales backgrounds score low.\n"
+    "2. Quota / target attainment (~25%): concrete evidence of meeting or "
+    "beating sales targets, revenue, or growth numbers.\n"
+    "3. Local market & language fit (~15%): knowledge of the territory named in "
+    "the JD and ability to work in the relevant language(s).\n"
+    "4. Industry / domain relevance (~15%): experience in the same or an "
+    "adjacent industry to the role.\n"
+    "5. Customer-facing & communication signals (~10%): consultative selling, "
+    "objection handling, relationship management.\n"
+    "6. Stability & progression (~5%): sensible tenure and career growth; "
+    "excessive unexplained job-hopping is a mild negative."
+)
+
 # Sibling trigger slugs — how the workflows address each other.
 _SLOT_SLUG = "hr-slot"
 _SCORING_SLUG = "hr-scoring"
@@ -95,26 +120,54 @@ HR_SOURCING = WorkflowDefinition(
                 "html_body": "<p>The ATS candidate search failed for {{ start.role_title }}.</p>",
             },
         ),
+        # Résumé screening: an LLM reads every fetched candidate's résumé,
+        # scores it against the JD on explicit criteria, and returns ONLY the
+        # candidates who clear the bar — so invites go to the shortlist, not the
+        # whole ATS dump. Tool-less agent → returns its completion (the JSON
+        # array); the for_each loose-JSON parser consumes it directly.
+        AgentNode(
+            id="screen",
+            name="Screen Résumés → Shortlist",
+            depends_on=["fetch", "start"],
+            activate_on={"fetch": "ok"},
+            role="You are an expert technical recruiter screening résumés for a role.",
+            instructions=(
+                "You are given a job description and a JSON array of candidates "
+                "(each with fields such as candidate_id, name, email, phone, and "
+                "a résumé / experience summary). Evaluate EACH candidate's résumé "
+                "against the job description using the criteria below.\n\n"
+                + _SCREEN_CRITERIA
+                + "\n\nShortlist a candidate only if their overall fit_score is "
+                + str(_SCREEN_THRESHOLD)
+                + " or higher. Return a JSON array containing ONLY the "
+                "shortlisted candidates. For each, COPY every original field "
+                "verbatim (candidate_id, name, email, phone, role) and ADD two "
+                "fields: `fit_score` (integer 0-100) and `fit_reason` (one short "
+                "sentence). Do not alter emails, ids, or names in any way. Output "
+                "ONLY the JSON array — no prose, no code fences, no commentary. "
+                "If nobody qualifies, output []."
+            ),
+        ),
         DataStoreNode(
             id="store_candidates",
             name="Store Shortlist",
-            depends_on=["fetch"],
-            activate_on={"fetch": "ok"},
+            depends_on=["screen"],
             op="write",
             table="candidates",
             key="{{ start.role_title }}",
             payload={
                 "role": "{{ start.role_title }}",
-                "candidates": "{{ fetch.data }}",
-                "status": "sourced",
+                "sourced": "{{ fetch.data }}",
+                "shortlist": "{{ screen }}",
+                "status": "screened",
             },
         ),
         ForEachNode(
             id="per_candidate",
-            name="For Each Candidate",
+            name="For Each Shortlisted Candidate",
             depends_on=["store_candidates"],
-            items_from="fetch",
-            items_path="$.data",
+            items_from="screen",
+            items_path="$",
             item_var="candidate",
             body=["sign_slot_link", "send_invite"],
             max_concurrency=5,
