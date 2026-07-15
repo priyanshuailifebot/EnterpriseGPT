@@ -17,9 +17,13 @@
 - [ ] `.env` has your **LLM key** (Azure OpenAI or Anthropic) — scoring + self-heal need it.
 - [ ] All **six** HR templates instantiated in **one** workspace.
 - [ ] A free **mock ATS** endpoint connected (returns a ~26-candidate pool of varied-quality résumés) using `you+alias@` emails, so the screening step has something real to filter.
-- [ ] **Gmail connected** so invite/summary/recruiter emails actually send.
-- [ ] One workflow pre-seeded with a **self-heal defect** (see Scene 6) — saved, *not yet healed*.
-- [ ] Tabs ready: workflow editor, `/run` page, your email inbox, a candidate `/hr/slot?ctx=…` link.
+- [ ] **Gmail connected** so invite/summary/interviewer/recruiter emails actually send.
+- [ ] **Interview ladder** ready for the role — either let Sourcing auto-design it, or seed a fixed
+      ladder. To demo the human path with no voice provider, set at least one round's `mode` to
+      `human` (the interviewer brief + `/hr/feedback` form path was verified end-to-end this way).
+- [ ] One workflow pre-seeded with a **self-heal defect** (see Scene 7) — saved, *not yet healed*.
+- [ ] Tabs ready: workflow editor, `/run` page, your email inbox, a candidate `/hr/slot?ctx=…` link,
+      and the interviewer `/hr/feedback?ctx=…` link if showing a human round.
 - [ ] Do a silent dry-run once so timings feel natural.
 
 **Total runtime target:** ~8 min. Scene budget below.
@@ -44,12 +48,14 @@
 **On screen:** Open the **Library** / templates list showing the six `hr-*` workflows; hover each.
 
 > "Instead of one giant fragile automation, it's six small workflows, each doing one job and handing
-> off to the next: **Sourcing** pulls candidates, an LLM **screens their résumés** against the role
-> and invites only the shortlist; **Start Call** places the AI
-> interview once a candidate picks a time; **Score & Review** grades the conversation; **Decision** is
-> the human approval step; and two background jobs — a **Chaser** that nudges people who haven't
-> booked, and a weekly **Ranking**. Because they're separate and event-driven, one candidate's
-> hiccup never stalls everyone else's."
+> off to the next: **Sourcing** pulls candidates, an LLM **screens their résumés** against the role,
+> invites only the shortlist, and **designs the interview ladder** for the role from the job
+> description; **Start Round** runs whichever round the candidate is up to — an AI voice interview or
+> a human interviewer — with questions generated for that round; **Score & Review** grades each round;
+> **Decision** is the human approval step that **advances the candidate to the next round or extends
+> the offer**; and two background jobs — a **Chaser** that nudges people who haven't booked, and a
+> weekly **Ranking**. Because they're separate and event-driven, one candidate's hiccup never stalls
+> everyone else's."
 
 **Cut cue:** end on the HR Sourcing tile.
 
@@ -98,53 +104,63 @@ arrived.
 
 ---
 
-## Scene 5 — Candidate journey: slot → AI interview → score  *(3:50–5:30)*
+## Scene 5 — The interview ladder: round 1 → score  *(3:50–5:20)*
 
 **On screen:** Click the invite link → the **`/hr/slot`** page ("Schedule your interview"). Pick a
-time + language → **Confirm slot** → success screen. Then either (a) show the live voice call
-completing, or (b) narrate that the call ran and jump to the scored result. Then open the
-**recruiter email** with Approve / Reject links.
+time + language → **Confirm slot** → success screen. Then, depending on the round type, either (a)
+narrate the AI voice call and jump to the scored result, or (b) — for a human round — show the
+**interviewer brief** email with its round-specific questions + **Submit feedback** button, and the
+`/hr/feedback` form. Then open the **recruiter email** with Approve / Reject links.
 
 > "The candidate opens the link and picks a time — and their preferred language; we support English,
 > Hindi, Tamil, Telugu and Marathi. They confirm…"
 
 *(success screen)*
 
-> "…and that instantly triggers the AI voice interview. An AI agent calls the candidate and runs a
-> structured screening conversation on an eight-point rubric — local market knowledge, communication,
-> objection handling, and so on."
+> "…and that starts the first round of the ladder the system designed for this role. Here's the key
+> idea: the rounds aren't hardcoded. For a sales role it might be a sales screen then an HR round; for
+> an engineer, a technical screen then behavioral then a hiring-manager round. Each round is **AI by
+> default** — an AI voice agent calls the candidate — but any round can be switched to a **human
+> interviewer**, and for those the system emails the interviewer a **brief with questions it generated
+> for that specific round**, plus a link to submit their assessment."
 
-*(jump to the scored result / recruiter email)*
+*(for a human round: show the interviewer brief email + the /hr/feedback form)*
 
-> "When the call ends, an **LLM scores the transcript** against that rubric and **drafts the emails
-> itself** — no canned templates. The candidate gets a warm, professional thank-you note, and **I**,
-> the recruiter, get the AI's written assessment — fit, strengths, gaps, an overall rating and a
-> recommendation — with two buttons: **Approve** or **Reject**."
+> "Either way — AI transcript or human feedback — an **LLM scores that round against its own focus**
+> and **drafts the emails itself**, no canned templates. The candidate gets a warm thank-you note, and
+> **I**, the recruiter, get a written assessment for that round — strengths, gaps, an overall rating,
+> and a recommendation — with two buttons: **Approve** or **Reject**."
 
-**On screen:** open the recruiter email — show the AI-written assessment paragraph + the Approve/Reject buttons.
+**On screen:** open the recruiter email — show the per-round assessment paragraph + the Approve/Reject buttons.
 
 **Cut cue:** the recruiter email, assessment + Approve/Reject links prominent.
 
 > **Note:** these emails send for real via native Gmail. For the demo everything is **self-addressed**
-> (candidate + recruiter both route to your own inbox via `+aliases`), so nothing reaches a real person.
+> (candidate, interviewer, and recruiter all route to your own inbox via `+aliases`), so nothing
+> reaches a real person.
 
 ---
 
-## Scene 6 — The human gate (the headline)  *(5:30–6:10)*
+## Scene 6 — The human gate + the ladder loop (the headline)  *(5:20–6:20)*
 
-**On screen:** Click **Approve** (or **Reject**) in the recruiter email → the confirmation page
-("Thanks — your response has been recorded"). Optionally show the booked calendar event.
+**On screen:** Click **Approve** in the recruiter email → the confirmation page ("Thanks — your
+response has been recorded"). Then switch to the inbox to show the **next-round invite** that just
+arrived ("You're moving forward — HR Round"). Fast-forward through that round the same way, approve
+again, and show the final **offer email** ("Great news about your application").
 
 > "This is the part I care most about. The system does everything up to here on its own — but it
 > **never** advances or rejects a candidate by itself. That's always an explicit human decision. I
 > click Approve…"
 
-*(confirmation)*
+*(confirmation → next-round invite arrives)*
 
-> "…and it books the next round automatically. If I'd clicked Reject, it would simply record that —
-> no candidate is ever turned away by an algorithm without a person signing off."
+> "…and it automatically moves the candidate to the **next round of the ladder** — a fresh invite to
+> book the next interview goes out, and the whole cycle repeats: interview, score, my approval. When
+> the candidate clears the **last** round and I approve, the system doesn't schedule another round —
+> it sends the **offer**. And if I'd clicked Reject at any point, it would simply record that. No
+> candidate is ever advanced, or turned away, by an algorithm without a person signing off."
 
-**Cut cue:** the confirmation / booked event.
+**Cut cue:** the offer email ("Great news about your application").
 
 ---
 
@@ -182,9 +198,9 @@ approval condition to reference a field that doesn't exist.)* Click **Diagnose &
 
 **On screen:** Back to the full pipeline / the Published workflows list.
 
-> "So: sourcing to decision, mostly autonomous, always human-governed, and self-healing when it
-> matters. This runs today on our own platform — no external orchestration tool. Happy to go deeper
-> on any part."
+> "So: sourcing and résumé-screening, a role-specific interview ladder, scoring, and offer — mostly
+> autonomous, always human-governed at every round, and self-healing when it matters. This runs today
+> on our own platform — no external orchestration tool. Happy to go deeper on any part."
 
 **Cut cue:** hold on the pipeline for 2s, stop recording.
 
@@ -194,7 +210,7 @@ approval condition to reference a field that doesn't exist.)* Click **Diagnose &
 
 | If you can't… | Do this instead (still looks real) |
 |---|---|
-| Place a real voice call (no Retell) | Narrate "the AI agent runs the call" over Scene 5, then trigger the scoring step with a canned transcript (Guide §5.2). The **LLM scores that transcript for real** and drafts the assessment email — so the recruiter email is genuine even without live voice. |
+| Place a real voice call (no Retell) | **Run the ladder with human-mode rounds** — set the rounds' `mode` to `human`. This exercises the *entire* loop (round-specific brief → `/hr/feedback` form → per-round assessment → approve → next round → offer) with **zero** voice provider, and every email is real. This is exactly how the flow was verified end-to-end. Alternatively, narrate "the AI agent runs the call" and feed the scoring step a canned transcript (Guide §5.2) — the LLM still scores it for real. |
 | Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1) — it returns a 26-candidate pool of varied-quality résumés so the LLM screening visibly shortlists ~7. The run, screening, and emails are all real. |
 | Show scheduled jobs (Chaser/Ranking) | Skip — just mention them in Scene 2. They're background jobs and don't film well. |
 | Get self-heal to propose a fix | Make sure the defect is a **prompt** or **condition** flaw, not a missing integration (the healer intentionally won't auto-fix credential issues). |

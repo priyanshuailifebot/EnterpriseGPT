@@ -362,9 +362,11 @@ HR_INTERVIEW = WorkflowDefinition(
                 "The input contains the job description (`jd_text`) and the "
                 "current interview round (name, type, focus). "
                 + _QUESTION_INSTR
-                + " Present the questions as a clean numbered list followed by a "
-                "short 'Scoring rubric:' list — readable prose an interviewer can "
-                "use directly."
+                + " Focus ONLY on the CURRENT round named in the input — do NOT "
+                "describe the overall interview process, the ladder, or any other "
+                "round. Begin directly with the questions as a clean numbered "
+                "list, followed by a short 'Scoring rubric:' list — readable prose "
+                "an interviewer can use directly."
             ),
         ),
         # mode gate: AI voice round vs human interviewer round.
