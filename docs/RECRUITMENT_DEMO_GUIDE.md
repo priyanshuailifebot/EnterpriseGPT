@@ -17,12 +17,21 @@ does one bounded job and then ends; the next one is kicked off by an external ev
 This "event-boundary" design is why it behaves like a production n8n pipeline instead of one
 fragile long-running graph.
 
+Two capabilities make it adaptive rather than hardcoded:
+- **Résumé screening** — Sourcing runs an LLM over every fetched candidate, scores each résumé
+  against the JD on explicit criteria, and invites **only the shortlist** (default bar 70/100).
+- **A per-role interview ladder** — Sourcing also asks an LLM to **design the sequence of rounds**
+  for the role from the JD (2–4 rounds, each with a type, a focus, and a mode). Every round is
+  **AI by default** (an AI voice interview) but any round can be a **human interviewer**; the last
+  hiring-manager/offer round defaults to human. The chain **loops** through the ladder: score →
+  human approval → next round, until the ladder is exhausted → **offer**.
+
 | # | Workflow | Trigger | What it does | Hands off to |
 |---|----------|---------|--------------|--------------|
-| 1 | **HR Sourcing** (`hr-sourcing`) | Manual | Pull candidates from ATS → store → email each a signed slot link | Web slot form → W2 |
-| 2 | **HR Interview — Start Call** (`hr-interview-start`) | Webhook `hr-slot` | Candidate picked a slot → place the AI voice interview call | Retell call-ended → W3 |
-| 3 | **HR Interview — Score & Review** (`hr-interview-scoring`) | Webhook `hr-scoring` | Fetch transcript → score on 8-point rubric → email candidate → email recruiter approve/reject links | Recruiter click → W4 |
-| 4 | **HR Interview — Decision** (`hr-decision`) | Webhook `hr-decision` | **Human gate.** Approve → book HR round; Reject → mark `not_advanced` | (terminal) |
+| 1 | **HR Sourcing** (`hr-sourcing`) | Manual (JD + role) | Fetch candidates → **LLM screens résumés → shortlist** → **LLM designs the interview ladder** → email each shortlisted candidate a signed slot link | Web slot form → W2 |
+| 2 | **HR Interview — Start Round** (`hr-interview-start`) | Webhook `hr-slot` | Candidate picked a slot → read the ladder, generate **that round's** questions → **AI voice call** *or* (human round) **book interviewer + email brief + `/hr/feedback` link** | Retell call-ended **or** feedback form → W3 |
+| 3 | **HR Interview — Score & Review** (`hr-interview-scoring`) | Webhook `hr-scoring` | Score the round (transcript **or** human feedback) against the round's focus → email candidate → email recruiter approve/reject links | Recruiter click → W4 |
+| 4 | **HR Interview — Decision** (`hr-decision`) | Webhook `hr-decision` | **Human gate.** Approve → **advance to the next round** (re-invite) or **extend the offer** if the ladder is done; Reject → mark `not_advanced` | Loops back to W2, or terminal |
 | 5 | **HR Chaser** (`hr-chaser`) | Schedule `0 10 * * *` | Daily: email candidates who never picked a slot | (terminal) |
 | 6 | **HR Ranking** (`hr-ranking`) | Schedule `0 18 * * 5` | Weekly Fri 18:00: stack-rank scored candidates | (terminal) |
 
@@ -134,21 +143,31 @@ Use the free/mock integrations from **§4** so you don't need Darwinbox/paid ATS
 
 Then walk the candidate journey:
 
-1. **Sourcing (published):** click **Run workflow** → `/workflows/{id}/run` → enter a job description
-   + role title → **Run**. It pulls candidates (from your mock ATS, §4.1) and emails each a real
-   signed slot link (`http://localhost:3000/hr/slot?ctx=…`).
+1. **Sourcing (published):** click **Run workflow** → `/workflows/{id}/run` → enter a **Job
+   description** + **Role title** → **Run**. It pulls candidates (from your mock ATS, §4.1),
+   **screens every résumé and keeps only the shortlist**, **designs the interview ladder** for the
+   role, and emails each shortlisted candidate a real signed slot link
+   (`http://localhost:3000/hr/slot?ctx=…`).
 2. **Candidate books a slot:** open the slot link (from the sent email, or copy it from the run output).
    The public page **"Schedule your interview"** shows a time picker + language (English/Hindi/Tamil/
    Telugu/Marathi). Pick one → **Confirm slot** → *"Your interview slot is booked."*
-   → this fires the **hr-slot** webhook → **HR Interview** places the voice call.
-3. **Interview completes:** see §5 — either a real Retell call, or simulate the call-ended event.
-   → fires **hr-scoring** → transcript is scored on the 8-point rubric, the candidate gets a summary
-   email, and **you (the recruiter) get an email with Approve / Reject links.**
-4. **The human gate:** click **Approve** (or **Reject**) in the recruiter email. This is the
-   headline governance story — **the system never rejects a candidate on its own.**
-   - Approve → books the HR round (Pipedream/Calendly).
+   → this fires the **hr-slot** webhook → **Start Round** reads the ladder and runs the current round.
+3. **The round runs:**
+   - **AI round (default):** see §5 — a real Retell call, or simulate the call-ended event.
+   - **Human round:** the **interviewer** gets an email brief with that round's questions + a
+     **Submit feedback** button → the **`/hr/feedback`** page collects a rating + notes.
+   Either way → fires **hr-scoring** → the round is scored against **its own focus**, the candidate
+   gets a summary email, and **you (the recruiter) get an email with Approve / Reject links.**
+4. **The human gate + the loop:** click **Approve** (or **Reject**) in the recruiter email. This is the
+   headline governance story — **the system never advances or rejects a candidate on its own.**
+   - Approve → **advances to the next round** (a fresh slot invite goes out and the cycle repeats),
+     or — when the candidate has cleared the **last** round — sends the **offer**.
    - Reject → records `not_advanced`.
    Either way the candidate sees *"Thanks — your response has been recorded."*
+
+> **Demo tip — no Retell needed:** set the ladder's rounds to `mode: "human"` and you can drive the
+> **entire loop** (brief → `/hr/feedback` → per-round assessment → approve → next round → offer)
+> with zero voice provider. This is exactly how the flow was verified end-to-end.
 
 > **If you don't want to wire live voice** (most common for a first demo): publish W2/W3 and, at the
 > point a call would complete, fire the scoring step yourself with a canned transcript (§5.2). The
@@ -167,23 +186,36 @@ and exactly what to do if you can't get the paid one.
   expects a JSON list or `{data:[…]}` of `{candidate_id, name, email, phone}`). The generic
   `http_bearer` provider also ships `darwinbox_resume_search` / `darwinbox_candidate_get` slugs.
 - **Cost:** Darwinbox is enterprise/paid — **no free tier.**
+> **Screening needs résumé text.** Each candidate should carry a `resume` (or experience summary)
+> field — that's what the LLM screen scores. Return a **pool of ~25+ candidates of varied quality**
+> so the shortlist step visibly filters (e.g. 26 in → ~7 out). Two candidates with no résumé text
+> won't demonstrate screening.
+
 - **If you can't get it — three options, best first:**
-  1. **Preview/Test mode (zero setup):** the built-in **demo stub** returns two sample candidates
-     automatically. Perfect for Act 1. *Limitation: the stub does **not** fire once the workflow is
-     Published/live.*
+  1. **Preview/Test mode (zero setup):** the built-in **demo stub** returns a couple of sample
+     candidates automatically — fine to show the graph *runs*, but with no résumé text the screen
+     step can't shortlist meaningfully. *Also: the stub does **not** fire once Published/live.*
   2. **Free mock endpoint (for a genuinely *published* run):** stand up a free static-JSON endpoint
      (e.g. **mocky.io**, **Beeceptor**, a **Pipedream** HTTP workflow, or **webhook.site**) that
-     returns the candidate JSON below, and connect it as the ATS **base_url**. Now a *published*
-     Sourcing run really calls it and really emails candidates — no Darwinbox needed.
+     returns a candidate list **with résumés**, and connect it as the ATS **base_url**. Now a
+     *published* Sourcing run really screens, shortlists, and emails candidates — no Darwinbox needed.
+     Each item needs at least:
 
      ```json
-     { "data": [
-       { "candidate_id": "cand-001", "name": "Asha Rao",     "email": "you+asha@yourgmail.com",   "phone": "+91-90000-00001" },
-       { "candidate_id": "cand-002", "name": "Vikram Singh", "email": "you+vikram@yourgmail.com", "phone": "+91-90000-00002" }
-     ] }
+     [
+       { "candidate_id": "cand-asha", "name": "Asha Rao", "email": "you+asha@yourgmail.com",
+         "phone": "+91-90000-00001",
+         "resume": "6 years Field Sales Advisor, Pune FMCG. Carried a 1.2Cr quota, beat target 5/6 years. Fluent Marathi/Hindi/English." },
+       { "candidate_id": "cand-dev", "name": "Dev Sharma", "email": "you+dev@yourgmail.com",
+         "phone": "+91-90000-00002",
+         "resume": "6 years backend software engineer (Java). No sales experience." }
+     ]
      ```
-     > Tip: use **your own** `you+alias@gmail.com` addresses so the invite emails actually land in
-     > your inbox and you can click through the rest of the flow live.
+     A bare JSON list or a `{ "data": [ … ] }` envelope both work. The repo's demo used a small local
+     Python server returning ~26 such candidates (8 clear-fit, 6 borderline, 12 unrelated) so the
+     screen shortlisted ~7.
+     > Tip: use **your own** `you+alias@gmail.com` addresses so invites (and, for human rounds, the
+     > interviewer brief at `you+interviewer@…`) land in your inbox and you can click through live.
   3. **Later, real Darwinbox:** just paste the real search endpoint URL + bearer token into the ATS
      connector. No workflow change.
 
@@ -194,9 +226,13 @@ and exactly what to do if you can't get the paid one.
   **Retell call-ended webhook** must point at `POST /api/v1/voice/retell/callback` (gated by
   `RETELL_WEBHOOK_SECRET`).
 - **Cost:** Retell and Vapi are paid but **both offer free trial credits** — enough for a demo call.
-- **If you can't get it:** **skip the live call** and drive `hr-scoring` yourself with a canned
-  transcript (§5.2). You lose only the "phone actually rings" moment; scoring → recruiter email →
-  human decision all still run live.
+- **If you can't get it — two no-voice options:**
+  1. **Run the ladder in human mode** — set the rounds' `mode` to `human`. The interviewer gets a
+     brief + `/hr/feedback` form; submitting it re-enters `hr-scoring` exactly like a transcript.
+     This exercises the **whole loop** (including the multi-round advance → offer) with no voice
+     provider at all, and every email is real. Recommended.
+  2. **Simulate the call-ended event** for an AI round — drive `hr-scoring` yourself with a canned
+     transcript (§5.2). You lose only the "phone actually rings" moment.
 
 ### 4.3 Email — **Gmail** (Google Workspace)
 
@@ -223,8 +259,8 @@ and exactly what to do if you can't get the paid one.
 
 | Step | Paid? | Cheapest way to demo |
 |------|-------|----------------------|
-| ATS (Darwinbox) | Paid, no free tier | **Demo stub** (preview) or **free mock endpoint** (published) |
-| Voice (Retell) | Paid, free trial credits | Trial credits, or **simulate call-ended** (§5.2) |
+| ATS (Darwinbox) | Paid, no free tier | **Demo stub** (preview) or **free mock endpoint with résumés** (published, §4.1) |
+| Voice (Retell) | Paid, free trial credits | **Human-mode rounds** (no voice at all), trial credits, or **simulate call-ended** (§5.2) |
 | Email (Gmail) | **Free** | Connect Gmail (or simulated in preview) |
 | Calendar (Pipedream/Calendly) | **Free tier** | Free tier (or simulated in preview) |
 | LLM (Azure OpenAI) | Paid — **you already have it** | Your existing key |
@@ -361,17 +397,29 @@ Every heal (interactive or headless) records an incident. Show them via
 - [ ] `docker compose up -d postgres redis api web` healthy (`+ api-worker` if §6/§7.4).
 - [ ] `.env`: Azure OpenAI creds set; `APP_PUBLIC_URL` / `WEB_PUBLIC_URL` correct; `api` restarted.
 - [ ] All **six** HR templates instantiated in **one** workspace (§1.3).
-- [ ] Free **mock ATS** endpoint returning the candidate JSON, connected as the ATS `base_url` (§4.1).
-- [ ] Gmail connected (so invite/summary/recruiter emails actually send), using `you+alias@` addresses.
+- [ ] Free **mock ATS** endpoint returning a **~26-candidate pool with `resume` text** (varied
+      quality), connected as the ATS `base_url` (§4.1) — so screening visibly shortlists.
+- [ ] Gmail connected (so invite/summary/interviewer/recruiter emails actually send), using
+      `you+alias@` addresses (candidate, `+interviewer`, `+recruiter`).
 - [ ] Each workflow you'll show live is **Published** (Save → Test → connect integrations → Publish).
-- [ ] Decided voice path: live Retell trial **or** simulate call-ended (§5.2). If live: `RETELL_WEBHOOK_SECRET` set + Retell webhook pointed at the callback.
+- [ ] Decided round path: **human mode** (no voice — brief + `/hr/feedback`), live Retell trial, or
+      simulate call-ended (§5.2). If live voice: `RETELL_WEBHOOK_SECRET` set + Retell webhook pointed
+      at the callback.
 - [ ] One workflow pre-loaded with a **self-heal defect** (§7.2), saved.
-- [ ] Browser tabs open: editor, `/run` page, and a candidate `/hr/slot?ctx=…` link ready.
+- [ ] Browser tabs open: editor, `/run` page (with JD + Role fields), a candidate `/hr/slot?ctx=…`
+      link, and — for a human round — the interviewer `/hr/feedback?ctx=…` link.
 
 ## 9. Common gotchas (so nothing surprises you live)
 
 - **ATS stub ≠ live.** Sample candidates only appear in preview/Test. A *published* Sourcing run
   calls your ATS `base_url` — use the mock (§4.1) or it'll error/return nothing.
+- **Screening needs résumés.** The shortlist step scores a `resume` field. If the ATS returns
+  candidates with no résumé text, everyone passes (or nobody does) — use a résumé-bearing pool (§4.1).
+- **The ladder is stored per role.** Sourcing writes the LLM-designed ladder to `interview_plans`
+  keyed by role; the round + decision workflows read it. Re-running Sourcing for the same role
+  regenerates it. To force a specific ladder (e.g. all-`human` for a no-voice demo), seed that row.
+- **Sourcing takes inputs.** The `/run` page shows **Job description** + **Role title** fields for
+  Sourcing (a manual trigger with form fields). Fill both before Run.
 - **Publish is gated** — you must run a successful Test first *and* connect required integrations,
   or you get a 409 / "run a successful test first" toast.
 - **Everything automated is off by default** — scheduler, voice callback, and the self-heal monitor
