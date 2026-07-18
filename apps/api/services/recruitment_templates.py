@@ -176,40 +176,50 @@ HR_SOURCING = WorkflowDefinition(
         # candidates who clear the bar — so invites go to the shortlist, not the
         # whole ATS dump. Tool-less agent → returns its completion (the JSON
         # array); the for_each loose-JSON parser consumes it directly.
-        AgentNode(
+        # Résumé screen — a DIRECT structured-JSON LLM call (not a ReAct agent,
+        # which narrates prose). Returns {"shortlist": [ ... ]} of only the
+        # candidates who clear the fit bar; the for_each invites exactly those.
+        ActionNode(
             id="screen",
             name="Screen Résumés → Shortlist",
             depends_on=["fetch", "start"],
             activate_on={"fetch": "ok"},
-            role="You are an expert technical recruiter screening résumés for a role.",
-            instructions=(
-                "You are given a job description and a JSON array of candidates "
-                "(each with fields such as candidate_id, name, email, phone, and "
-                "a résumé / experience summary). Evaluate EACH candidate's résumé "
-                "against the job description using the criteria below.\n\n"
-                + _SCREEN_CRITERIA
-                + "\n\nShortlist a candidate only if their overall fit_score is "
-                + str(_SCREEN_THRESHOLD)
-                + " or higher. Return a JSON array containing ONLY the "
-                "shortlisted candidates. For each, COPY every original field "
-                "verbatim (candidate_id, name, email, phone, role) and ADD two "
-                "fields: `fit_score` (integer 0-100) and `fit_reason` (one short "
-                "sentence). Do not alter emails, ids, or names in any way. Output "
-                "ONLY the JSON array — no prose, no code fences, no commentary. "
-                "If nobody qualifies, output []."
-            ),
+            provider="internal",
+            action_slug="llm_json",
+            params={
+                "system": (
+                    "You are an expert technical recruiter screening résumés. You "
+                    "are given a job description and a JSON array of candidates "
+                    "(each with candidate_id, name, email, phone, and a résumé). "
+                    "Evaluate EACH candidate against the JD.\n\n"
+                    + _SCREEN_CRITERIA
+                    + "\n\nShortlist a candidate only if their overall fit_score "
+                    "is " + str(_SCREEN_THRESHOLD) + " or higher. Return a JSON "
+                    'object of the form {"shortlist": [ ... ]} containing ONLY the '
+                    "shortlisted candidates. For each, COPY every original field "
+                    "verbatim (candidate_id, name, email, phone, role) and ADD "
+                    "`fit_score` (integer 0-100) and `fit_reason` (one short "
+                    "sentence). Do not alter emails, ids, or names. If nobody "
+                    'qualifies, return {"shortlist": []}.'
+                ),
+                "input": "JOB DESCRIPTION:\n{{ start.jd_text }}\n\nCANDIDATES (JSON):\n{{ fetch.data }}",
+            },
         ),
-        # Design the interview ROUND LADDER for this role from the JD (LLM).
-        # Generated once per sourcing run and stored per-role; every candidate
-        # of this role advances through the same ladder (progress tracked per
-        # candidate via round_index in the signed ctx).
-        AgentNode(
+        # Design the interview ROUND LADDER for this role from the JD — also a
+        # direct JSON call. Returns {"rounds": [ ... ]}. Stored per-role; every
+        # candidate of this role advances through the same ladder (progress
+        # tracked per candidate via round_index in the signed ctx).
+        ActionNode(
             id="plan",
             name="Design Interview Ladder",
             depends_on=["fetch", "start"],
             activate_on={"fetch": "ok"},
-            role=_LADDER_ROLE,
-            instructions=_LADDER_INSTR,
+            provider="internal",
+            action_slug="llm_json",
+            params={
+                "system": _LADDER_ROLE + " " + _LADDER_INSTR,
+                "input": "JOB DESCRIPTION:\n{{ start.jd_text }}",
+            },
         ),
         DataStoreNode(
             id="store_plan",
@@ -221,7 +231,7 @@ HR_SOURCING = WorkflowDefinition(
             payload={
                 "role_title": "{{ start.role_title }}",
                 "jd_text": "{{ start.jd_text }}",
-                "ladder": "{{ plan }}",
+                "ladder": "{{ plan.data.rounds }}",
             },
         ),
         DataStoreNode(
@@ -234,7 +244,7 @@ HR_SOURCING = WorkflowDefinition(
             payload={
                 "role": "{{ start.role_title }}",
                 "sourced": "{{ fetch.data }}",
-                "shortlist": "{{ screen }}",
+                "shortlist": "{{ screen.data.shortlist }}",
                 "status": "screened",
             },
         ),
@@ -243,7 +253,7 @@ HR_SOURCING = WorkflowDefinition(
             name="For Each Shortlisted Candidate",
             depends_on=["store_candidates", "store_plan"],
             items_from="screen",
-            items_path="$",
+            items_path="$.data.shortlist",
             item_var="candidate",
             body=["sign_slot_link", "send_invite"],
             max_concurrency=5,

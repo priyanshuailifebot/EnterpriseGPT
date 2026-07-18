@@ -794,6 +794,46 @@ def _coerce_index(val: Any) -> int:
         return 0
 
 
+async def _llm_json(params: dict[str, Any]) -> dict[str, Any]:
+    """Direct structured-JSON LLM call (bypasses the ReAct agent, which narrates
+    prose instead of emitting strict JSON). Used by sourcing's résumé-screen and
+    ladder-design steps, which must return machine-parseable JSON. ``params``:
+    ``system`` (instructions) + ``input`` (the data). Returns ``{data: <obj>}``."""
+    from core.config import get_settings
+    from openai import AsyncAzureOpenAI
+
+    s = get_settings()
+    ep = (s.AZURE_OPENAI_ENDPOINT or "").strip().rstrip("/")
+    key = (s.AZURE_OPENAI_API_KEY or "").strip()
+    if not ep or not key:
+        return {"data": {}, "__error__": "azure_openai credentials missing"}
+    deployment = (
+        s.AZURE_OPENAI_WORKFLOW_DEPLOYMENT
+        or s.AZURE_OPENAI_DEPLOYMENT
+        or getattr(s, "AZURE_OPENAI_DEFAULT_MODEL", "")
+    )
+    client = AsyncAzureOpenAI(
+        azure_endpoint=ep, api_key=key, api_version=s.AZURE_OPENAI_API_VERSION
+    )
+    comp = await client.chat.completions.create(
+        model=deployment,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": str(params.get("system") or "")},
+            {"role": "user", "content": str(params.get("input") or "")},
+        ],
+    )
+    txt = comp.choices[0].message.content or "{}"
+    try:
+        data = json.loads(txt)
+    except json.JSONDecodeError:
+        from services.output_parser_service import extract_json_loose
+
+        data = extract_json_loose(txt) or {}
+    return {"data": data}
+
+
 def _hr_pick_round(params: dict[str, Any]) -> dict[str, Any]:
     """Deterministically select ladder[round_index]. Pure function (no LLM) so
     control-flow (AI/human mode, round name) is always reliably structured."""
@@ -1139,6 +1179,8 @@ async def invoke_action(
     # internal.hr_pick_round / hr_advance: deterministic ladder helpers (pure
     # functions, no LLM, no side effects) — run in draft/preview too so the
     # round-aware recruitment chain has reliable structured control-flow.
+    if prov == "internal" and slug == "llm_json":
+        return await _llm_json(params or {})
     if prov == "internal" and slug == "hr_pick_round":
         return _hr_pick_round(params or {})
     if prov == "internal" and slug == "hr_advance":
