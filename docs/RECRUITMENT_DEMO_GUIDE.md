@@ -141,6 +141,27 @@ Publish the workflows you want to show live (at minimum **Sourcing** + the three
 the chain resolves end-to-end). For each: **Save → Test → connect its integrations → Publish** (§2).
 Use the free/mock integrations from **§4** so you don't need Darwinbox/paid ATS.
 
+> **Demo inputs — paste these into the Sourcing `/run` page.** They match the résumés in the mock
+> ATS pool (§4.1), so the LLM shortlists the sales candidates and rejects the unrelated ones, and the
+> ladder it designs is a sales ladder.
+>
+> **Role title:**
+> ```
+> Field Sales Advisor
+> ```
+> **Job description:**
+> ```
+> We're hiring a Field Sales Advisor for our Maharashtra region. You'll own a territory, carry a
+> monthly revenue quota, and grow a portfolio of retail and small-business accounts through
+> consultative, in-person selling. Responsibilities: prospect and onboard new dealers and retailers,
+> meet and exceed monthly sales targets, manage relationships across the territory, handle objections
+> and negotiate, and report your pipeline weekly. Requirements: 3+ years of B2B/B2C field or channel
+> sales with a clear track record of hitting quota, strong local-market knowledge of Maharashtra, and
+> fluency in Marathi and Hindi (English a plus).
+> ```
+> *(Expected result: ~26 candidates in → a shortlist of ~7 sales-fit candidates invited; engineers,
+> nurses, teachers, etc. are screened out.)*
+
 Then walk the candidate journey:
 
 1. **Sourcing (published):** click **Run workflow** → `/workflows/{id}/run` → enter a **Job
