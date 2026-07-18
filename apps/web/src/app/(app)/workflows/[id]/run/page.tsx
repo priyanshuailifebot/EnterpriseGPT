@@ -120,8 +120,14 @@ export default function WorkflowRunPage() {
       }
     }
 
-    // Form trigger — collect typed fields.
-    if (trigger?.trigger_type === "form") {
+    // Form trigger — or a manual trigger that declares input fields — collect
+    // the typed fields (manual workflows like HR Sourcing take a JD + role).
+    if (
+      trigger &&
+      (trigger.trigger_type === "form" ||
+        (trigger.trigger_type === "manual" &&
+          (trigger.form_fields?.length ?? 0) > 0))
+    ) {
       for (const f of trigger.form_fields) {
         if (!f.required) continue;
         const v = formState[f.key];
@@ -474,7 +480,15 @@ function TriggerInput({
         />
       );
     case "manual":
-      return (
+      // A manual trigger can still declare input fields (e.g. HR Sourcing's
+      // Job description + Role title). Render them when present.
+      return trigger.form_fields?.length ? (
+        <FormTriggerInputs
+          fields={trigger.form_fields}
+          formState={formState}
+          setFormState={setFormState}
+        />
+      ) : (
         <InfoCard
           title="Manual trigger"
           body="No inputs are required. Click Execute to run the workflow now."
