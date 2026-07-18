@@ -228,6 +228,53 @@ async def list_templates_route(
     return {"templates": public_catalog()}
 
 
+@router.get("/hr/leaderboard", status_code=status.HTTP_200_OK)
+async def hr_leaderboard_route(
+    workspace_id: Annotated[UUID, Query()],
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    """Recruiter-facing candidate leaderboard: ranks the workspace's
+    ``interview_results`` live by numeric score (freshest view, no need to run
+    the weekly HR Ranking job). Registered before ``/{workflow_id}`` so the
+    literal path isn't captured as a workflow id.
+    """
+    from services.workflow_service import ensure_workspace_membership
+    from models.workflow_data import WorkflowData
+
+    await ensure_workspace_membership(db, user_id=user.id, workspace_id=workspace_id)
+    rows = (
+        await db.execute(
+            select(WorkflowData).where(
+                WorkflowData.workspace_id == workspace_id,
+                WorkflowData.table_name == "interview_results",
+            )
+        )
+    ).scalars().all()
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        d = r.data or {}
+        try:
+            score: float | None = float(d.get("score"))
+        except (TypeError, ValueError):
+            score = None
+        items.append(
+            {
+                "candidate_id": d.get("candidate_id"),
+                "name": d.get("name") or d.get("candidate_id"),
+                "role_title": d.get("role_title"),
+                "score": score,
+                "status": d.get("status"),
+                "current_round_name": d.get("current_round_name") or d.get("round_name"),
+                "assessment": d.get("assessment"),
+            }
+        )
+    items.sort(key=lambda x: (x["score"] if x["score"] is not None else -1.0), reverse=True)
+    for i, it in enumerate(items, start=1):
+        it["rank"] = i
+    return {"ranking": items, "workspace_id": str(workspace_id)}
+
+
 @router.get(
     "/{workflow_id}",
     dependencies=[require_permission(Permission.WORKFLOW_READ)],
