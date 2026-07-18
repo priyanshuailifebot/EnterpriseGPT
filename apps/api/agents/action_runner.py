@@ -585,28 +585,62 @@ def _normalize_composio_arguments(
     return out
 
 
-def _ats_demo_stub(params: dict[str, Any]) -> dict[str, Any]:
-    """Sample candidate shortlist for draft/demo runs of the ATS search action.
+# Demo candidate pool for draft/preview ATS runs — varied-quality résumés so the
+# résumé-screening step visibly shortlists (~7 of 26) and the ladder is
+# role-shaped. (slug, name, résumé) tuples; emails are example.com (preview never
+# sends). Roughly: 8 clear-fit sales, 6 borderline, 12 unrelated.
+_ATS_DEMO_POOL: list[tuple[str, str, str]] = [
+    # --- strong: relevant field sales, quota, territory/language ---
+    ("asha", "Asha Rao", "6 years Field Sales Advisor at a Pune FMCG distributor. Carried a 1.2Cr quota, beat target 5 of 6 years. 40+ retail accounts across Maharashtra. Marathi, Hindi, English."),
+    ("vikram", "Vikram Singh", "8 years B2B field sales in industrial equipment, Delhi-NCR. 110-130% of quota, President's Club twice. Strong consultative selling and objection handling."),
+    ("meera", "Meera Nair", "5 years channel sales for a telecom, Bangalore. Grew territory revenue 35% YoY, onboarded 60 dealers. Kannada, Tamil, English."),
+    ("rohit", "Rohit Deshmukh", "7 years pharma field sales rep, Western India. Exceeded quota 4 years running, top 5% nationally. Deep local network. Marathi, Hindi."),
+    ("fatima", "Fatima Sheikh", "4 years FMCG territory sales officer, Hyderabad. 122% avg attainment, expanded distribution to 90 outlets. Telugu, Urdu, English."),
+    ("arjun", "Arjun Menon", "9 years B2C field sales in consumer durables, Kochi. 25-store territory, beat quota 7 of 9 years. Malayalam, Tamil, English."),
+    ("neha", "Neha Kulkarni", "5 years insurance field advisor, Pune. MDRT qualifier 3 times, 130% of premium target. Consultative needs-based selling. Marathi, Hindi."),
+    ("sameer", "Sameer Patel", "6 years agri-inputs field sales, Gujarat. Grew dealer base 40%, quota attainment 115%. Gujarati, Hindi. Farmer engagement + demos."),
+    # --- borderline: some sales exposure but gaps ---
+    ("priya", "Priya Iyer", "2 years inside sales (phone, not field) for a SaaS firm, Chennai. Hit 105% of quota. No field experience yet. Tamil, English."),
+    ("kabir", "Kabir Khan", "3 years retail store manager, then 1 year sales executive. Limited territory ownership. Hindi, English."),
+    ("divya", "Divya Reddy", "Marketing associate 4 years with occasional field activation. No direct quota ownership. Telugu, English."),
+    ("aman", "Aman Gupta", "1 year FMCG field sales trainee, still ramping. Early quota attainment ~90%. Hindi, English."),
+    ("sanya", "Sanya Malhotra", "3 years customer success manager (renewals/upsell) at a fintech. Revenue-adjacent, not field sales. English, Hindi."),
+    ("irfan", "Irfan Ansari", "Real-estate broker 5 years (commission-based). Strong negotiation, no structured quota. Hindi, Urdu, English."),
+    # --- weak: no relevant sales / wrong domain ---
+    ("dev", "Dev Sharma", "6 years backend software engineer (Java, microservices). No sales experience."),
+    ("tara", "Tara Bose", "Registered nurse, 8 years in a Kolkata hospital. No sales background. Bengali, Hindi."),
+    ("mohan", "Mohan Kumar", "Accountant, 10 years, CA. Bookkeeping and audit. No customer-facing sales role."),
+    ("lata", "Lata Verma", "Primary school teacher 12 years. Excellent communication but no sales or quota experience."),
+    ("nikhil", "Nikhil Jain", "Fresh graduate, B.Sc Physics. No work experience."),
+    ("gita", "Gita Pillai", "Data analyst, 4 years, SQL/Python dashboards. No field or sales experience."),
+    ("raj", "Raj Malhotra", "Warehouse operations supervisor, 7 years logistics. No selling role."),
+    ("shreya", "Shreya Das", "Graphic designer, 5 years freelance. Creative portfolio, no sales."),
+    ("imran", "Imran Qureshi", "Mechanical engineer in manufacturing QA, 6 years. No sales experience."),
+    ("pooja", "Pooja Shetty", "HR generalist, 5 years recruiting and payroll. No revenue/quota role."),
+    ("vivek", "Vivek Rao", "Chef and kitchen manager, 9 years hospitality. No sales background."),
+    ("anita", "Anita Joseph", "Content writer and editor, 6 years. Strong English, no sales role."),
+]
 
-    Shape matches the ``ats`` connector contract (list under ``data``) so the
-    sourcing template's ``for_each`` iterates realistically without a live ATS.
+
+def _ats_demo_stub(params: dict[str, Any]) -> dict[str, Any]:
+    """Sample candidate pool for draft/preview runs of the ATS search action.
+
+    Shape matches the ``ats`` connector contract (list under ``data``). Includes
+    a ``resume`` field and a varied-quality pool so the sourcing template's
+    résumé-screening step shortlists realistically without a live ATS. Preview
+    runs simulate email, so the ``example.com`` addresses never send.
     """
     role = str(params.get("role") or "Field Sales Advisor")
     samples = [
         {
-            "candidate_id": "cand-001",
-            "name": "Asha Rao",
-            "email": "asha.rao@example.com",
-            "phone": "+91-90000-00001",
+            "candidate_id": f"cand-{slug}",
+            "name": name,
+            "email": f"{slug}@example.com",
+            "phone": "+91-90000-00000",
+            "resume": resume,
             "role": role,
-        },
-        {
-            "candidate_id": "cand-002",
-            "name": "Vikram Singh",
-            "email": "vikram.singh@example.com",
-            "phone": "+91-90000-00002",
-            "role": role,
-        },
+        }
+        for slug, name, resume in _ATS_DEMO_POOL
     ]
     return {
         "__provider__": "ats",
