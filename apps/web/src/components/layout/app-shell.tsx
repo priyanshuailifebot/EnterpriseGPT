@@ -11,6 +11,7 @@ import {
   Settings2,
   Sparkles,
   SunMedium,
+  Trophy,
   Upload,
   Workflow,
 } from "lucide-react";
@@ -35,6 +36,12 @@ const nav: {
     href: "/workflows",
     label: "Workflows",
     icon: Workflow,
+    perm: "workflow:read",
+  },
+  {
+    href: "/recruitment/leaderboard",
+    label: "Leaderboard",
+    icon: Trophy,
     perm: "workflow:read",
   },
   {
