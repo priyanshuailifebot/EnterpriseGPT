@@ -197,10 +197,10 @@ HR_SOURCING = WorkflowDefinition(
                     "is " + str(_SCREEN_THRESHOLD) + " or higher. Return a JSON "
                     'object of the form {"shortlist": [ ... ]} containing ONLY the '
                     "shortlisted candidates. For each, COPY every original field "
-                    "verbatim (candidate_id, name, email, phone, role) and ADD "
-                    "`fit_score` (integer 0-100) and `fit_reason` (one short "
-                    "sentence). Do not alter emails, ids, or names. If nobody "
-                    'qualifies, return {"shortlist": []}.'
+                    "verbatim (candidate_id, name, email, phone, role, resume) and "
+                    "ADD `fit_score` (integer 0-100) and `fit_reason` (one short "
+                    "sentence). Do not alter emails, ids, names, or the resume. If "
+                    'nobody qualifies, return {"shortlist": []}.'
                 ),
                 "input": "JOB DESCRIPTION:\n{{ start.jd_text }}\n\nCANDIDATES (JSON):\n{{ fetch.data }}",
             },
@@ -274,6 +274,7 @@ HR_SOURCING = WorkflowDefinition(
                     "name": "{{ candidate.name }}",
                     "email": "{{ candidate.email }}",
                     "phone": "{{ candidate.phone }}",
+                    "resume": "{{ candidate.resume }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": 0,
                     "purpose": "slot",
@@ -386,56 +387,63 @@ HR_INTERVIEW = WorkflowDefinition(
             depends_on=["pick_round"],
             expression="$.pick_round.data.mode == 'ai'",
         ),
-        # ---- AI branch: place the voice interview with THIS round's questions ----
+        # ---- AI branch: no voice provider is wired, so SIMULATE the interview.
+        # Generate a realistic ~5-10 min transcript grounded in the JD, this
+        # round's focus + questions, and the candidate, then fire scoring — the
+        # same gate a real Retell call-ended callback would trigger. When a voice
+        # provider IS connected, swap these two nodes for a real call + the
+        # register_voice_route → callback path.
         ActionNode(
-            id="start_call",
-            name="Place Interview Call (Retell)",
-            depends_on=["is_ai", "gen_q"],
+            id="sim_transcript",
+            name="Simulate Interview (transcript)",
+            depends_on=["is_ai", "gen_q", "read_plan"],
             activate_on={"is_ai": "true"},
-            provider="mcp",
-            action_slug="start_interview",
-            on_error="route",
-            params={
-                "phone": "{{ start.phone }}",
-                "language": "{{ start.language }}",
-                "jd_summary": "{{ read_plan.row.jd_text }}",
-                "round": "{{ pick_round.data.name }}",
-                "questions": "{{ gen_q }}",
-            },
-        ),
-        ActionNode(
-            id="notify_call_failed",
-            name="Notify Recruiter: Call Failed",
-            depends_on=["start_call"],
-            activate_on={"start_call": "failed"},
-            provider="gmail",
-            action_slug="gmail_send",
-            params={
-                "to": "recruiting@example.com",
-                "subject": "Interview call failed to place",
-                "html_body": "<p>Could not start the interview for {{ start.candidate_id }}.</p>",
-            },
-        ),
-        ActionNode(
-            id="register_route",
-            name="Register Call → Scoring Route",
-            depends_on=["start_call"],
-            activate_on={"start_call": "ok"},
             provider="internal",
-            action_slug="register_voice_route",
+            action_slug="llm_json",
             params={
-                "call_id": "{{ start_call.data.call_id }}",
+                "system": (
+                    "You simulate a realistic screening interview. Produce a "
+                    "natural ~5-10 minute phone-interview transcript as alternating "
+                    "'Interviewer:' and 'Candidate:' turns, grounded in the job "
+                    "description, THIS round's focus, and the listed questions, "
+                    "with specific, believable candidate answers consistent with "
+                    "the candidate's background. 8-14 exchanges. Return JSON of the "
+                    'form {"transcript": "<the full transcript as one string>"}.'
+                ),
+                "input": (
+                    "ROLE: {{ start.role_title }}\n"
+                    "JOB DESCRIPTION:\n{{ read_plan.row.jd_text }}\n\n"
+                    "ROUND: {{ pick_round.data.name }} — {{ pick_round.data.focus }}\n\n"
+                    "QUESTIONS TO COVER:\n{{ gen_q }}\n\n"
+                    "CANDIDATE: {{ start.name }}\n"
+                    "CANDIDATE BACKGROUND: {{ start.resume }}"
+                ),
+            },
+        ),
+        ActionNode(
+            id="fire_scoring",
+            name="Route Transcript → Scoring",
+            depends_on=["sim_transcript"],
+            activate_on={"is_ai": "true"},
+            provider="internal",
+            action_slug="fire_workflow",
+            params={
                 "target_slug": _SCORING_SLUG,
                 "context": {
                     "candidate_id": "{{ start.candidate_id }}",
                     "name": "{{ start.name }}",
                     "email": "{{ start.email }}",
                     "phone": "{{ start.phone }}",
+                    "resume": "{{ start.resume }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": "{{ start.round_index }}",
                     "round_name": "{{ pick_round.data.name }}",
                     "round_focus": "{{ pick_round.data.focus }}",
                     "mode": "ai",
+                },
+                "payload": {
+                    "source": "simulated_call",
+                    "transcript": "{{ sim_transcript.data.transcript }}",
                 },
             },
         ),
@@ -557,19 +565,38 @@ HR_SCORING = WorkflowDefinition(
                 "like <p> and <b>."
             ),
         ),
+        # Extract a numeric 0-100 score from the prose assessment (direct JSON
+        # call — reliable), so ranking can stack-rank candidates deterministically.
+        ActionNode(
+            id="score_num",
+            name="Extract Numeric Score",
+            depends_on=["score"],
+            provider="internal",
+            action_slug="llm_json",
+            params={
+                "system": (
+                    "Extract the single overall rating out of 100 from this hiring "
+                    "assessment. If a number is stated, use it; otherwise estimate "
+                    'from the tone. Return JSON {"score": <integer 0-100>}.'
+                ),
+                "input": "{{ score }}",
+            },
+        ),
         DataStoreNode(
             id="store_results",
             name="Store Interview Results",
-            depends_on=["score"],
+            depends_on=["score", "score_num"],
             op="write",
             table="interview_results",
             key="{{ start.candidate_id }}",
             payload={
                 "candidate_id": "{{ start.candidate_id }}",
+                "name": "{{ start.name }}",
                 "role_title": "{{ start.role_title }}",
                 "round_index": "{{ start.round_index }}",
                 "round_name": "{{ start.round_name }}",
                 "assessment": "{{ score }}",
+                "score": "{{ score_num.data.score }}",
                 "status": "scored",
             },
         ),
@@ -606,6 +633,7 @@ HR_SCORING = WorkflowDefinition(
                     "name": "{{ start.name }}",
                     "email": "{{ start.email }}",
                     "phone": "{{ start.phone }}",
+                    "resume": "{{ start.resume }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": "{{ start.round_index }}",
                     "decision": "approve",
@@ -729,6 +757,7 @@ HR_DECISION = WorkflowDefinition(
                     "name": "{{ start.name }}",
                     "email": "{{ start.email }}",
                     "phone": "{{ start.phone }}",
+                    "resume": "{{ start.resume }}",
                     "role_title": "{{ start.role_title }}",
                     "round_index": "{{ advance.data.next_index }}",
                     "purpose": "slot",
@@ -907,15 +936,15 @@ HR_RANKING = WorkflowDefinition(
             table="interview_results",
             filter={},
         ),
-        AgentNode(
+        # Deterministic stack-rank by numeric score (pure function — the ReAct
+        # agent would narrate prose instead of emitting JSON).
+        ActionNode(
             id="rank",
             name="Stack Rank",
-            role="Recruiting analyst.",
-            instructions=(
-                "Take the interview_results rows. Sort by overall score "
-                "descending. Emit JSON: [{candidate_id, overall, rank}]."
-            ),
             depends_on=["results"],
+            provider="internal",
+            action_slug="hr_stack_rank",
+            params={"rows": "{{ results }}"},
         ),
         DataStoreNode(
             id="store_ranking",
@@ -924,7 +953,7 @@ HR_RANKING = WorkflowDefinition(
             op="write",
             table="candidate_ranking",
             key="latest",
-            payload={"ranking": "{{ rank }}"},
+            payload={"ranking": "{{ rank.data.ranking }}"},
         ),
     ],
 )

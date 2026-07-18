@@ -867,6 +867,78 @@ def _hr_advance(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _hr_stack_rank(params: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically stack-rank interview results by numeric score. Pure
+    function (no LLM — the ReAct agent narrates prose). Input ``rows`` is the
+    data_store query result (``{rows:[{key,data}]}`` or a bare list). Returns
+    ``{data: {ranking: [{rank, candidate_id, name, role_title, score, status}]}}``.
+    """
+    rows = params.get("rows")
+    if isinstance(rows, str):
+        try:
+            rows = json.loads(rows)
+        except json.JSONDecodeError:
+            from services.output_parser_service import extract_json_loose
+
+            rows = extract_json_loose(rows)
+    if isinstance(rows, dict) and isinstance(rows.get("rows"), list):
+        rows = rows["rows"]
+    items: list[dict[str, Any]] = []
+    for r in rows if isinstance(rows, list) else []:
+        d = r.get("data", r) if isinstance(r, dict) else {}
+        if not isinstance(d, dict):
+            continue
+        try:
+            score = float(d.get("score"))
+        except (TypeError, ValueError):
+            score = -1.0
+        items.append(
+            {
+                "candidate_id": d.get("candidate_id"),
+                "name": d.get("name") or d.get("candidate_id"),
+                "role_title": d.get("role_title"),
+                "score": score if score >= 0 else None,
+                "status": d.get("status"),
+                "current_round_name": d.get("current_round_name") or d.get("round_name"),
+            }
+        )
+    items.sort(key=lambda x: (x["score"] if x["score"] is not None else -1), reverse=True)
+    for i, it in enumerate(items, start=1):
+        it["rank"] = i
+    return {"data": {"ranking": items, "count": len(items)}}
+
+
+async def _fire_workflow(
+    params: dict[str, Any], *, workspace_id: UUID | None
+) -> dict[str, Any]:
+    """Fire a sibling workflow by trigger slug with a signed ctx — used to
+    SIMULATE the voice-call-ended callback for AI rounds when no voice provider
+    is connected. ``params``: ``target_slug`` + ``context`` (baked into the token)
+    + ``payload`` (posted body, e.g. the simulated transcript)."""
+    import httpx
+
+    from core.config import get_settings
+    from core.security import sign_trigger_context
+
+    target = str(params.get("target_slug") or "").strip()
+    if not target:
+        return {"data": {}, "__error__": "target_slug required"}
+    ctx = dict(params.get("context") or {})
+    if workspace_id is not None and "__ws__" not in ctx:
+        ctx["__ws__"] = str(workspace_id)
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    token = sign_trigger_context(ctx)
+    s = get_settings()
+    base = (getattr(s, "APP_PUBLIC_URL", "") or "http://localhost:8000").rstrip("/")
+    url = f"{base}/api/v1/workflows/slug/{target}?ctx={token}"
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(url, json=payload)
+        return {"data": {"fired": target, "status_code": resp.status_code}}
+    except Exception as exc:  # pragma: no cover - network/timeout
+        return {"data": {"fired": target}, "__error__": f"fire_workflow failed: {exc}"}
+
+
 def _generate_pdf(params: dict[str, Any]) -> dict[str, Any]:
     """Render markdown/plain text to a PDF payload (base64 envelope)."""
     from services.pdf_service import render_pdf_result
@@ -1185,6 +1257,10 @@ async def invoke_action(
         return _hr_pick_round(params or {})
     if prov == "internal" and slug == "hr_advance":
         return _hr_advance(params or {})
+    if prov == "internal" and slug == "hr_stack_rank":
+        return _hr_stack_rank(params or {})
+    if prov == "internal" and slug == "fire_workflow":
+        return await _fire_workflow(params or {}, workspace_id=workspace_id)
 
     # ATS candidate search scaffold: in draft/demo (not live) return a sample
     # shortlist so the recruitment templates run end-to-end without a live ATS.
