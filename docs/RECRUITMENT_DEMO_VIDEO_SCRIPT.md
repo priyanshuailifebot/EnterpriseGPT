@@ -92,7 +92,7 @@ arrived.
 > It pulls matching candidates from our applicant system — here, twenty-six of them — and then an
 > LLM reads every résumé and scores it against the role on explicit criteria: relevant sales
 > experience, quota track record, local-market and language fit, and so on. Only the ones that clear
-> the bar get invited. Watch — twenty-six candidates in, a shortlist of about seven out, and each of
+> the bar get invited. Watch — twenty-six candidates in, a shortlist of the strongest few out, and each of
 > those gets a personal interview invitation. Nobody unqualified is ever contacted."
 
 *(switch to inbox)*
@@ -211,7 +211,7 @@ approval condition to reference a field that doesn't exist.)* Click **Diagnose &
 | If you can't… | Do this instead (still looks real) |
 |---|---|
 | Place a real voice call (no Retell) | **Run the ladder with human-mode rounds** — set the rounds' `mode` to `human`. This exercises the *entire* loop (round-specific brief → `/hr/feedback` form → per-round assessment → approve → next round → offer) with **zero** voice provider, and every email is real. This is exactly how the flow was verified end-to-end. Alternatively, narrate "the AI agent runs the call" and feed the scoring step a canned transcript (Guide §5.2) — the LLM still scores it for real. |
-| Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1) — it returns a 26-candidate pool of varied-quality résumés so the LLM screening visibly shortlists ~7. The run, screening, and emails are all real. |
+| Connect a live ATS (Darwinbox is paid) | Use the free mock endpoint (Guide §4.1) — it returns a 26-candidate pool of varied-quality résumés so the LLM screening visibly shortlists the strongest few. The run, screening, and emails are all real. |
 | Show scheduled jobs (Chaser/Ranking) | Skip — just mention them in Scene 2. They're background jobs and don't film well. |
 | Get self-heal to propose a fix | Make sure the defect is a **prompt** or **condition** flaw, not a missing integration (the healer intentionally won't auto-fix credential issues). |
 

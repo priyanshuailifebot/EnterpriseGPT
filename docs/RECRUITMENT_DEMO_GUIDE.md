@@ -159,7 +159,7 @@ Use the free/mock integrations from **§4** so you don't need Darwinbox/paid ATS
 > sales with a clear track record of hitting quota, strong local-market knowledge of Maharashtra, and
 > fluency in Marathi and Hindi (English a plus).
 > ```
-> *(Expected result: ~26 candidates in → a shortlist of ~7 sales-fit candidates invited; engineers,
+> *(Expected result: ~26 candidates in → a shortlist of the strongest few (typically ~3–8, model-dependent) invited; engineers,
 > nurses, teachers, etc. are screened out.)*
 
 Then walk the candidate journey:
@@ -209,7 +209,7 @@ and exactly what to do if you can't get the paid one.
 - **Cost:** Darwinbox is enterprise/paid — **no free tier.**
 > **Screening needs résumé text.** Each candidate should carry a `resume` (or experience summary)
 > field — that's what the LLM screen scores. Return a **pool of ~25+ candidates of varied quality**
-> so the shortlist step visibly filters (e.g. 26 in → ~7 out). Two candidates with no résumé text
+> so the shortlist step visibly filters (e.g. 26 in → the strongest few out). Two candidates with no résumé text
 > won't demonstrate screening.
 
 - **If you can't get it — three options, best first:**
@@ -234,7 +234,7 @@ and exactly what to do if you can't get the paid one.
      ```
      A bare JSON list or a `{ "data": [ … ] }` envelope both work. The repo's demo used a small local
      Python server returning ~26 such candidates (8 clear-fit, 6 borderline, 12 unrelated) so the
-     screen shortlisted ~7.
+     screen shortlisted the strongest few (~3–8; exact count varies by model/threshold, tunable via _SCREEN_THRESHOLD).
      > Tip: use **your own** `you+alias@gmail.com` addresses so invites (and, for human rounds, the
      > interviewer brief at `you+interviewer@…`) land in your inbox and you can click through live.
   3. **Later, real Darwinbox:** just paste the real search endpoint URL + bearer token into the ATS
